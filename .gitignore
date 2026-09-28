@@ -1,0 +1,36 @@
+# Local credentials and tunnel state
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+_apikey/
+_tunnelID.txt
+.runtime/
+.local/
+
+# Python environments, caches, and build output
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Downloaded tunnel binaries and runtime logs
+tunnel-client-*/
+*.log
+*.pid
+*.zip
+
+# Local editor and OS files
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

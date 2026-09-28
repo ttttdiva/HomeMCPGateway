@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "home-mcp-gateway"
+version = "0.1.0"
+description = "Unrestricted local MCP gateway for Secure MCP Tunnel"
+requires-python = ">=3.10"
+dependencies = [
+  "mcp>=2.2,<3",
+  "psutil>=7,<8",
+  "Pillow>=11.2.1,<13",
+  "playwright>=1.51,<2",
+  "httpx>=0.28,<1",
+  "python-dotenv>=1.0,<2",
+  "pywin32>=311; sys_platform == 'win32'",
+  "comtypes>=1.4.17,<2; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+]
+
+[project.scripts]
+home-mcp-gateway = "home_mcp_gateway.server:main"
+
+[tool.setuptools.packages.find]
+include = ["home_mcp_gateway*"]
