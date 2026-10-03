@@ -168,7 +168,7 @@ def _last_output(result: dict[str, Any], max_bytes: int = 4000) -> str:
 
 def job_start(command: str | list[str], cwd: str | None = None, env: dict[str, str] | None = None,
               runtime_dir: str | None = None) -> dict[str, Any]:
-    """Start a persistent job. String command uses the host shell; argv list avoids shell quoting. Returns job ID, identity, logs and Git provenance."""
+    """Start a persistent Windows workspace job. String command uses the workspace shell; argv list avoids shell quoting. Returns job ID, identity, logs and Git provenance."""
     job_id = str(uuid.uuid4())
     directory = _directory(job_id, runtime_dir)
     directory.mkdir(parents=True)

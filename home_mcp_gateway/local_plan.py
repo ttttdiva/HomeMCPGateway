@@ -590,7 +590,7 @@ def local_read_plan(
     max_result_bytes: int = DEFAULT_MAX_RESULT_BYTES,
     max_steps: int = DEFAULT_MAX_STEPS,
 ) -> dict[str, Any]:
-    """Execute a static, bounded sequence of read-only local operations.
+    """Execute a static, bounded sequence of read-only Windows workspace operations.
 
     The plan is validated in full before any operation starts.  Operations are
     sequential and cannot refer to previous results.  On a step failure or

@@ -42,7 +42,23 @@ async def lifespan(server):
         await browser_qa.close_all()
 
 
-mcp = MCPServer("Home MCP Gateway", lifespan=lifespan, middleware=[telemetry.ToolTelemetryMiddleware()])
+mcp = MCPServer(
+    "Home MCP Gateway",
+    title="Windows Workspace Gateway",
+    description=(
+        "Authenticated MCP tools for an operator-owned connected Windows workspace, "
+        "including workspace files, processes, networking, application windows, Git, "
+        "browser, and Android tooling."
+    ),
+    instructions=(
+        "Treat this server as the tool surface of the connected Windows workspace. "
+        "Use the exposed MCP tools to inspect or operate resources available in that "
+        "workspace. The term 'workspace' refers to the Windows environment reached "
+        "through this gateway."
+    ),
+    lifespan=lifespan,
+    middleware=[telemetry.ToolTelemetryMiddleware()],
+)
 
 # Register the two real-desktop Computer Use tools first. Some remote MCP
 # consumers cache or cap large tool catalogs; keeping these first makes the
@@ -53,7 +69,7 @@ register_tools(mcp, desktop.TOOLS)
 
 @tracked_tool(mcp)
 def system_info() -> dict[str, Any]:
-    """Return host OS, CPU, RAM, disks, network interfaces, Python runtime, and NVIDIA GPU information when available."""
+    """Return Windows workspace OS, CPU, RAM, disks, network interfaces, Python runtime, and NVIDIA GPU information when available."""
     return core.system_info()
 
 
@@ -71,7 +87,7 @@ def set_environment(name: str, value: str | None = None) -> dict[str, Any]:
 
 @tracked_tool(mcp)
 def list_directory(path: str, recursive: bool = False) -> dict[str, Any]:
-    """List files and directories at any host path. Set recursive to walk the full tree."""
+    """List files and directories at any Windows workspace path. Set recursive to walk the full tree."""
     return core.list_directory(path, recursive)
 
 
@@ -168,7 +184,7 @@ def hash_file(path: str, algorithm: str = "sha256") -> dict[str, Any]:
 
 @tracked_tool(mcp)
 def run_command(command: str, cwd: str | None = None, timeout_sec: float = 0, env: dict[str, str] | None = None, max_output_chars: int = 0) -> dict[str, Any]:
-    """Run an arbitrary command through the host shell. timeout_sec=0 and max_output_chars=0 mean unlimited."""
+    """Run an arbitrary command through the Windows workspace shell. timeout_sec=0 and max_output_chars=0 mean unlimited."""
     return core.run_command(command, cwd, timeout_sec, env, max_output_chars)
 
 
@@ -193,7 +209,7 @@ def start_process(command: str, cwd: str | None = None, env: dict[str, str] | No
 @tracked_tool(mcp)
 def list_processes(name_contains: str | None = None, detailed: bool = False,
                    include_details: bool | None = None) -> dict[str, Any]:
-    """List host processes; detailed status fields are opt-in."""
+    """List Windows workspace processes; detailed status fields are opt-in."""
     return core.list_processes(name_contains, detailed, include_details)
 
 
@@ -211,19 +227,19 @@ def kill_process(pid: int, recursive: bool = True, force: bool = True) -> dict[s
 
 @tracked_tool(mcp)
 def http_request(method: str, url: str, headers: dict[str, str] | None = None, body: str | None = None, body_base64: str | None = None, timeout_sec: float = 60, verify_tls: bool = True, max_response_bytes: int = 0) -> dict[str, Any]:
-    """Send an arbitrary HTTP/HTTPS request, including to local services. Supports text or base64 request bodies."""
+    """Send an arbitrary HTTP/HTTPS request, including services reachable from the Windows workspace. Supports text or base64 request bodies."""
     return core.http_request(method, url, headers, body, body_base64, timeout_sec, verify_tls, max_response_bytes)
 
 
 @tracked_tool(mcp)
 def download_url(url: str, destination: str, headers: dict[str, str] | None = None, timeout_sec: float = 0, verify_tls: bool = True) -> dict[str, Any]:
-    """Download a URL directly to any host filesystem path."""
+    """Download a URL directly to any Windows workspace filesystem path."""
     return core.download_url(url, destination, headers, timeout_sec, verify_tls)
 
 
 @tracked_tool(mcp)
 def screenshot(path: str = "") -> dict[str, Any]:
-    """Capture all host screens to a PNG. Leave path empty to use the temporary directory."""
+    """Capture all connected Windows workspace displays to a PNG. Leave path empty to use the temporary directory."""
     return core.screenshot(path)
 
 

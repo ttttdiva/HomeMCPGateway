@@ -309,9 +309,9 @@ async def _finish(client: Client, initial: dict[str, Any], wait_seconds: float,
 
 
 async def aoitalk_clip_connection() -> dict[str, Any]:
-    """Check local AoiTalk login and ClipIngest job read access; do not create clips.
+    """Check the configured AoiTalk login and ClipIngest job read access; do not create clips.
 
-    Uses local .env credentials internally; never return credentials or existing
+    Uses operator-configured .env credentials internally; never return credentials or existing
     clip content. A successful check does not prove that the LLM worker works.
     """
     try:

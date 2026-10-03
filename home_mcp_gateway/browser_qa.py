@@ -157,7 +157,7 @@ async def browser_click(session_id: str, selector: str, button: str = "left", ti
 
 async def browser_fill(session_id: str, selector: str, value: str, timeout_sec: float = 30,
                        verify_value: bool = True, verify_timeout_sec: float = 5) -> dict[str, Any]:
-    """Fill input/textarea/contenteditable and read back locally without submitting.
+    """Fill input/textarea/contenteditable and read back within the workspace browser session without submitting.
     No entered value is returned or included in verification diagnostics.
     """
     _verify_budget(verify_timeout_sec)
@@ -210,7 +210,7 @@ async def browser_run_plan(
     jev_confidence: float = 0.50,
     jev_timeout_sec: float = 5,
 ) -> dict[str, Any]:
-    """Run one complete browser strategy locally. Supply ordered semantic steps; Jev selects each current DOM target, while Gateway code executes and verifies the actions. Omit session_id to create a browser automatically."""
+    """Run one complete browser strategy in the workspace browser session. Supply ordered semantic steps; Jev selects each current DOM target, while Gateway code executes and verifies the actions. Omit session_id to create a browser automatically."""
     if type(timeout_sec) not in {int, float} or not 1 <= timeout_sec <= 900:
         raise ValueError("timeout_sec must be between 1 and 900")
     created_session = False

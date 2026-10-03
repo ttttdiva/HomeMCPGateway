@@ -35,7 +35,7 @@ def image_result(picture: Image.Image, **metadata: Any) -> CallToolResult:
 
 
 def register_tools(server: Any, functions: list) -> None:
-    """Preserve typed discovery schemas and expose actionable host diagnostics."""
+    """Preserve typed discovery schemas and expose actionable workspace diagnostics."""
     for fn in functions:
         def wrap(target):
             hints = get_type_hints(target)

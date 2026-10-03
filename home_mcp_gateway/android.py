@@ -347,7 +347,7 @@ def adb_keyevent(keycode: str, serial: str | None = None, adb_path: str | None =
 
 
 def adb_install(apk_path: str, serial: str | None = None, replace: bool = True, timeout_sec: float = 180, adb_path: str | None = None) -> dict[str, Any]:
-    """Install a local APK on the selected Android device, optionally replacing the existing package."""
+    """Install an APK file from the Windows workspace on the selected Android device, optionally replacing the existing package."""
     return _public(_adb(["install", *(["-r"] if replace else []), str(Path(apk_path).expanduser().resolve())], serial, adb_path, timeout_sec))
 
 

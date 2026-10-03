@@ -181,7 +181,7 @@ async def aoitalk_local_task_start(
     expected_branch: str | None = None,
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
-    """Delegate a multi-step local goal to AoiTalk's local LLM agent; returns task_id at once.
+    """Delegate a multi-step workspace goal to AoiTalk's LLM agent; returns task_id at once.
 
     Use for adaptive work (build -> analyze error -> search -> fix -> rebuild ...).
     For fixed command sequences use job_start/run_command instead (deterministic).
@@ -249,7 +249,7 @@ def _compact(task: dict[str, Any]) -> dict[str, Any]:
 
 
 async def aoitalk_local_task_status(task_id: str, wait_seconds: float = 0) -> dict[str, Any]:
-    """Read one AoiTalk local task: state, progress counters, stalled flag and final summary.
+    """Read one AoiTalk workspace task: state, progress counters, stalled flag and final summary.
 
     wait_seconds (0-20) waits briefly for completion; the call never blocks
     longer. Terminal states: completed / failed / cancelled. While running,
@@ -278,7 +278,7 @@ async def aoitalk_local_task_status(task_id: str, wait_seconds: float = 0) -> di
 
 
 async def aoitalk_local_task_tail(task_id: str, limit: int = 30, max_bytes: int = 12000) -> dict[str, Any]:
-    """Return a bounded tail of an AoiTalk local task's event log (commands, edits, notes).
+    """Return a bounded tail of an AoiTalk workspace task's event log (commands, edits, notes).
 
     limit 1-200 events, max_bytes 1024-64000. Secrets are redacted by AoiTalk;
     full raw logs are never returned.
@@ -306,7 +306,7 @@ async def aoitalk_local_task_tail(task_id: str, limit: int = 30, max_bytes: int 
 
 
 async def aoitalk_local_task_cancel(task_id: str) -> dict[str, Any]:
-    """Request cancellation of an AoiTalk local task (idempotent; running commands are stopped).
+    """Request cancellation of an AoiTalk workspace task (idempotent; running commands are stopped).
 
     A queued task is cancelled immediately; a running task stops at the next
     safe point. Poll aoitalk_local_task_status for the final cancelled state.
@@ -327,7 +327,7 @@ async def aoitalk_local_task_cancel(task_id: str) -> dict[str, Any]:
 
 
 async def aoitalk_local_task_list(limit: int = 10, status: str | None = None) -> dict[str, Any]:
-    """List recent AoiTalk local tasks (rediscover task_ids after restarts) and check the connection.
+    """List recent AoiTalk workspace tasks (rediscover task_ids after restarts) and check the connection.
 
     Also returns the AoiTalk worker configuration: model, allowed workspace
     roots and limits. status filters by queued/running/completed/failed/cancelled.

@@ -172,7 +172,7 @@ def capture_window(hwnd: int, expected_pid: int | None = None) -> CallToolResult
 _LOCK = threading.RLock()
 _OBSERVATIONS: OrderedDict[str, dict] = OrderedDict()
 _OBSERVATION_LIMIT = 64
-IMPLEMENTATION = "windows-computer-use-3-visual-first"
+IMPLEMENTATION = "windows-workspace-ui-3-visual-first"
 
 
 def _now() -> str:
@@ -210,9 +210,9 @@ def desktop_observe(
     max_depth: int = 16,
     max_nodes: int = 2000,
 ) -> CallToolResult:
-    """Observe the real logged-in Windows desktop; no isolated browser.
+    """Observe application windows and displays in the connected Windows workspace.
 
-    For a user request about something currently visible on screen, start here:
+    For a user request about something currently visible in the workspace, start here:
     list windows, then observe the intended window (normally with_uia=True),
     inspect the returned image/UIA, and interact with that visible target
     directly. Prefer this visual/direct path over indirect global controls such
@@ -338,7 +338,7 @@ def desktop_act(
     observe_after: bool = False,
     observe_with_uia: bool = False,
 ) -> dict[str, Any] | CallToolResult:
-    """Act on the real Windows desktop. Mouse/keyboard always use SendInput.
+    """Interact with the connected Windows workspace GUI. Mouse/keyboard always use SendInput.
 
     Prefer an element or coordinate obtained from the target application's most
     recent desktop_observe result. For user-visible state changes, re-observe

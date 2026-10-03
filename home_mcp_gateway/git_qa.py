@@ -155,7 +155,7 @@ def git_changed_files(workspace_path: str, files: list[str] | None = None, base_
 
 
 def git_worktree_cleanup(repository_path: str, workspace_path: str, force: bool = False) -> dict[str, Any]:
-    """Remove a registered worktree with Git. force=True discards its local changes; Git's usual semantics apply."""
+    """Remove a registered worktree with Git. force=True discards its worktree changes; Git's usual semantics apply."""
     dst = str(Path(workspace_path).expanduser().resolve())
     _git(repository_path, "worktree", "remove", *(["--force"] if force else []), "--", dst)
     return {"workspace_path": dst, "removed": True}
