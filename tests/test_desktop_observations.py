@@ -181,3 +181,95 @@ class DesktopObservationTests(unittest.TestCase):
         result = d.desktop_act('click', observation_id=data['observation_id'], x=-170, y=150)
         self.assertEqual(result['target_guard'], 'not_requested')
         self.perform.assert_called_once()
+
+
+class ComputerUseCoordinateTests(unittest.TestCase):
+    """window=/coordinate_space/modifiers/alias additions to desktop_act."""
+    setUp = DesktopObservationTests.setUp
+    observe = DesktopObservationTests.observe
+
+    def kwargs(self):
+        return self.perform.call_args.kwargs
+
+    def test_window_space_is_relative_to_observed_client_origin(self):
+        data = self.observe()
+        d.desktop_act('click', observation_id=data['observation_id'], x=10, y=20, coordinate_space='window')
+        self.assertEqual((self.kwargs()['x'], self.kwargs()['y']), (-182, 152))
+
+    def test_normalized_spans_first_to_last_pixel_of_observed_image(self):
+        data = self.observe()
+        for (nx, ny), expected in [((0, 0), (-192, 132)), ((1, 1), (-89, 231)), ((0.5, 0.5), (-140, 182))]:
+            with self.subTest(point=(nx, ny)):
+                d.desktop_act('move', observation_id=data['observation_id'], x=nx, y=ny, coordinate_space='normalized')
+                self.assertEqual((self.kwargs()['x'], self.kwargs()['y']), expected)
+
+    def test_normalized_drag_converts_end_point_and_rejects_out_of_range(self):
+        data = self.observe()
+        d.desktop_act('drag', observation_id=data['observation_id'], x=0.0, y=0.0, end_x=1.0, end_y=1.0,
+                      coordinate_space='normalized', button='middle')
+        kw = self.kwargs()
+        self.assertEqual((kw['end_x'], kw['end_y'], kw['button']), (-89, 231, 'middle'))
+        self.perform.reset_mock()
+        with self.assertRaisesRegex(ValueError, '0..1'):
+            d.desktop_act('click', observation_id=data['observation_id'], x=1.2, y=0.5, coordinate_space='normalized')
+        self.perform.assert_not_called()
+
+    def test_window_and_normalized_without_a_reference_fail_before_input(self):
+        for space in ('window', 'normalized'):
+            with self.subTest(space=space), self.assertRaisesRegex(ValueError, 'requires a target window'):
+                d.desktop_act('click', x=0.5, y=0.5, coordinate_space=space)
+        with self.assertRaisesRegex(ValueError, 'coordinate_space'):
+            d.desktop_act('click', x=1, y=1, coordinate_space='percent')
+        self.perform.assert_not_called()
+
+    def test_hwnd_without_observation_uses_live_client_area(self):
+        d.desktop_act('click', hwnd=123, x=0.0, y=1.0, coordinate_space='normalized')
+        self.assertEqual((self.kwargs()['x'], self.kwargs()['y']), (-192, 231))
+
+    def test_screen_space_is_unchanged_and_accepts_floats(self):
+        d.desktop_act('click', x=-12.4, y=7.6)
+        self.assertEqual((self.kwargs()['x'], self.kwargs()['y']), (-12, 8))
+
+    def test_aliases_map_to_canonical_actions(self):
+        for alias, action, extra in [('right_click', 'click', {'button': 'right'}),
+                                     ('middle_click', 'click', {'button': 'middle'}),
+                                     ('type_text', 'text', {}), ('hotkey', 'key', {}), ('press_key', 'press_key', {})]:
+            with self.subTest(alias=alias):
+                self.perform.reset_mock()
+                d.desktop_act(alias, x=1, y=2, text='a', keys=['a']) if alias.endswith('click') else \
+                    d.desktop_act(alias, text='a', keys=['Ctrl', 'a'])
+                args, kw = self.perform.call_args
+                self.assertEqual(args[1], action)
+                for key, value in extra.items():
+                    self.assertEqual(kw[key], value)
+
+    def test_modifiers_reach_input_and_are_pointer_only(self):
+        d.desktop_act('scroll', x=5, y=6, delta_y=120, modifiers=['Ctrl', 'Shift'])
+        self.assertEqual(self.kwargs()['modifiers'], ['Ctrl', 'Shift'])
+        self.perform.reset_mock()
+        with self.assertRaisesRegex(ValueError, 'pointer actions only'):
+            d.desktop_act('hotkey', keys=['a'], modifiers=['Ctrl'])
+        self.perform.assert_not_called()
+
+    def test_window_name_selects_target_and_records_resolution(self):
+        entry = dict(self.info, title='Blender 4.2', process_name='blender.exe', foreground=True)
+        with patch.object(d, 'list_windows', return_value={'windows': [entry]}), \
+             patch.object(d, '_is_cloaked', return_value=False):
+            result = d.desktop_act('click', window='Blender', x=0.5, y=0.5, coordinate_space='normalized')
+            self.assertEqual(result['hwnd'], 123)
+            self.assertEqual(result['window_resolution']['matched_by'], 'process_name')
+            with self.assertRaisesRegex(ValueError, 'window_not_found'):
+                d.desktop_act('click', window='NoSuchApp', x=1, y=1)
+
+    def test_observe_window_name_returns_geometry_and_png(self):
+        entry = dict(self.info, title='Blender 4.2', process_name='blender.exe', foreground=True)
+        with patch.object(d, 'list_windows', return_value={'windows': [entry]}), \
+             patch.object(d, '_is_cloaked', return_value=False):
+            result = d.desktop_observe(window='blender')
+        meta = result.structured_content
+        self.assertEqual(meta['mode'], 'window')
+        self.assertEqual(meta['capture_backend'], 'printwindow')
+        self.assertEqual(meta['window_resolution']['selected_hwnd'], 123)
+        self.assertEqual(meta['window_geometry']['client_size'], {'width': 104, 'height': 100})
+        self.assertEqual(meta['image_origin'], {'left': -192, 'top': 132})
+        self.assertEqual([c.type for c in result.content], ['text', 'image'])

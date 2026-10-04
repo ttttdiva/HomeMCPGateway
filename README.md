@@ -120,7 +120,7 @@ AoiTalk 自体が PC にインストール済みで、接続先・認証・必�
 | ホスト・ファイル | システム情報、環境変数、ファイルの読み書き、検索、コピー、移動、削除、ハッシュ |
 | コマンド・プロセス | 任意の shell / PowerShell / Python、プロセスの開始・確認・終了 |
 | ネットワーク | 任意の HTTP(S) リクエスト、ダウンロード、TCP / HTTP の readiness 確認 |
-| デスクトップ・端末 | Windows の観測・UI 操作、スクリーンショット、Android / ADB |
+| デスクトップ・端末 | Windows の観測・UI 操作、スクリーンショット（MCPネイティブPNG）、座標系 `screen`/`window`/`normalized` による視覚付き Computer Use（[詳細](docs/computer-use.ja.md)）、Android / ADB |
 | 開発ワークフロー | Git リポジトリ / worktree、長時間ジョブ、ブラウザ（Playwright） |
 | 画像・診断 | 画像コンテキスト、ツール実行のローカル診断ログ |
 | AoiTalk（任意） | クリップ取り込みとローカルタスク委譲。上記の 8 ツールを追加 |
