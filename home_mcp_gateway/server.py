@@ -5,11 +5,18 @@ from pathlib import Path
 from typing import Any
 from contextlib import asynccontextmanager
 
+# Scoped children must enter through the validated launcher. Never silently
+# expose the ordinary unrestricted catalog for a non-default profile.
+if os.environ.get("HOME_MCP_PROFILE"):
+    raise RuntimeError("HOME_MCP_PROFILE requires scripts/gateway_stdio.py")
+
 from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
 from dotenv import dotenv_values
 
-from . import core, aoitalk, aoitalk_tasks, image_library, local_plan
+from . import core, aoitalk, aoitalk_cli_sessions, aoitalk_tasks, image_library, local_plan
+from .aoitalk_task_schema import structured_task_tool
+from .aoitalk_cli_session_schema import structured_cli_session_tool
 from . import android, browser_qa, desktop, git_qa, jobs, readiness, telemetry
 from .qa_common import register_tools
 from .telemetry import instrument_tool, tracked_tool
@@ -280,7 +287,18 @@ if _aoitalk_enabled():
             destructive_hint=function is aoitalk_tasks.aoitalk_local_task_start,
             idempotent_hint=True,
             open_world_hint=not read_only,
-        ))(instrument_tool(function))
+        ))(structured_task_tool(instrument_tool(function)))
+
+    # CLI continuation sessions are owned by AoiTalk.  The Gateway only
+    # forwards bounded requests/results and never starts a provider process.
+    for function in aoitalk_cli_sessions.TOOLS:
+        read_only = function in aoitalk_cli_sessions.READ_ONLY_TOOLS
+        mcp.tool(annotations=ToolAnnotations(
+            read_only_hint=read_only,
+            destructive_hint=not read_only,
+            idempotent_hint=True,
+            open_world_hint=not read_only,
+        ))(structured_cli_session_tool(instrument_tool(function)))
 
 for function in image_library.TOOLS:
     mcp.tool(annotations=ToolAnnotations(

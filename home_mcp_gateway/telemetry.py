@@ -196,7 +196,7 @@ def instrument_tool(target: Callable[..., Any]) -> Callable[..., Any]:
     if getattr(target, "__home_mcp_instrumented__", False):
         return target
 
-    hints = get_type_hints(target)
+    hints = get_type_hints(target, include_extras=True)
     signature = inspect.signature(target, eval_str=True)
     tool_name = target.__name__
 

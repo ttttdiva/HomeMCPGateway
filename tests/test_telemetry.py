@@ -5,12 +5,22 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from typing import Annotated, get_type_hints
 from unittest.mock import patch
 
 from home_mcp_gateway import telemetry
 
 
 class TelemetryTests(unittest.TestCase):
+    def test_annotation_metadata_survives_instrumentation(self):
+        from pydantic import Field
+
+        def sample(value: Annotated[int, Field(ge=1, le=20)]) -> dict:
+            return {"value": value}
+
+        self.assertEqual(get_type_hints(telemetry.instrument_tool(sample), include_extras=True),
+                         get_type_hints(sample, include_extras=True))
+
     def test_instrument_tool_logs_timing_without_sensitive_values(self):
         with tempfile.TemporaryDirectory() as td, patch.dict(
             os.environ,

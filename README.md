@@ -59,13 +59,13 @@ Home MCP Gateway は、Windows PC 上で動くローカル MCP サーバーを O
 
    `.env`、Tunnel ID、runtime API key は Git に追加せず、ChatGPT のメッセージやアプリ設定にも入力しないでください。
 
-7. Gateway を接続します。
+7. 初回の接続とprofile作成を確認します。トンネル本体を可視コンソールで動かす手順は後述します。
 
    ```powershell
    .\scripts\connect_tunnel.ps1
    ```
 
-   スクリプトは `home-mcp` というローカル runtime を起動し、`process_running`、`healthy`、`ready` を確認します。接続は外向きに行われるため、受信用のファイアウォールポートを開ける必要はありません。
+   スクリプトは `home-mcp` というローカル runtime を起動し、`process_running`、`healthy`、`ready` を確認してプロンプトへ戻ります。トンネル画面は自動で開きません。接続は外向きに行われるため、受信用のファイアウォールポートを開ける必要はありません。
 
 ## ChatGPT 側のセットアップ
 
@@ -76,30 +76,111 @@ Home MCP Gateway は、Windows PC 上で動くローカル MCP サーバーを O
 
 公式の手順は [Connect ChatGPT to a remote MCP server](https://developers.openai.com/plugins/deploy/connect-chatgpt)、メタデータ更新は [Refresh MCP metadata](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata) を参照してください。ChatGPT のプロジェクトや接続アプリの一般的な使い方は [Using Projects in ChatGPT](https://help.openai.com/en/articles/10169521-using-projects-in-chatgpt) にあります。
 
-## 起動・自動起動・状態確認・停止
+## 通常起動・再起動・画面表示
 
-- 通常起動: `.\scripts\connect_tunnel.ps1`
-- 監視と再接続: `.\scripts\connect_tunnel.ps1 -Watch`
-- 状態確認: `tunnel-client.exe runtimes status home-mcp --json`
-- 停止: `tunnel-client.exe runtimes stop home-mcp`
+### トンネル本体を可視コンソールで実行する
 
-`tunnel-client.exe` が PATH にない場合は、コマンドの実行ファイル部分を展開先のフルパスに置き換えるか、`.env` の `TUNNEL_CLIENT_PATH` を設定してください。`connect_tunnel.ps1 -Watch` は状態を定期確認し、異常時に再接続します。
+**本体を手元のPowerShellで動かす場合は `tunnel-client.exe run` を使います。** `runtimes connect` は本体を管理対象の別プロセスとして起動・再利用するコマンドです。`connect_tunnel.ps1 -Watch` が表示するのは監視役の画面で、本体の前景コンソールではありません。
 
-自動起動と異常時の再接続を有効にするには、リポジトリのルートで次を実行します。このコマンドは現在の Windows ユーザー用に `Home MCP Gateway` タスクをインストールし、直ちに起動します。
+以下は、初回接続で `.runtime\profiles\home-mcp.yaml` が作成済みの場合の手順です。先に既存の監視と同じトンネルのruntimeを停止し、二重起動しない状態にしてから、リポジトリのルートで開いた専用PowerShellに貼り付けます。停止手順は下のバックグラウンド運用の節を参照してください。
+
+既存profileのAPI keyは `env:CONTROL_PLANE_API_KEY` 参照です。`run` 自体はリポジトリの `.env` を読み込みません。また、`connect_tunnel.ps1` は終了時に呼出元の環境を元へ戻すため、その実行後もキーがPowerShellに残るとは限りません。次の例は既存スクリプトと同じく `.env` を文字列として読み、キーを表示・コマンド引数へ展開せず、終了時に環境を復元します。
+
+配置先は新しく開いたPowerShell自身で指定します。`$GatewayRoot`の1行を実際の絶対パスへ変更してください。
+
+```powershell
+$GatewayRoot = 'C:\path\to\HomeMCPGateway'
+Set-Location -LiteralPath $GatewayRoot
+if (-not (Test-Path -LiteralPath (Join-Path $GatewayRoot '.env') -PathType Leaf)) { throw 'Gateway .env not found.' }
+$GatewaySavedEnv = @{}
+try {
+    foreach ($Line in [IO.File]::ReadAllLines((Join-Path $GatewayRoot '.env'))) {
+        $Entry = $Line.Trim()
+        if (-not $Entry -or $Entry.StartsWith('#')) { continue }
+        if ($Entry -notmatch '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') { throw 'Invalid .env assignment.' }
+        $Name = $Matches[1]
+        $Value = $Matches[2].Trim()
+        if ($Value.Length -ge 2 -and (($Value.StartsWith('"') -and $Value.EndsWith('"')) -or ($Value.StartsWith("'") -and $Value.EndsWith("'")))) {
+            $Value = $Value.Substring(1, $Value.Length - 2)
+        }
+        if (-not $GatewaySavedEnv.ContainsKey($Name)) {
+            $GatewaySavedEnv[$Name] = [Environment]::GetEnvironmentVariable($Name, 'Process')
+        }
+        [Environment]::SetEnvironmentVariable($Name, $Value, 'Process')
+    }
+    $TunnelClient = $env:TUNNEL_CLIENT_PATH
+    if (-not $TunnelClient) {
+        $TunnelClient = (Get-ChildItem -Path (Join-Path $GatewayRoot 'tunnel-client-*\tunnel-client.exe') -File |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+    }
+    if (-not $TunnelClient -or -not (Test-Path -LiteralPath $TunnelClient -PathType Leaf)) { throw 'Set TUNNEL_CLIENT_PATH in .env.' }
+    if (-not $env:CONTROL_PLANE_API_KEY) { throw 'CONTROL_PLANE_API_KEY is required.' }
+    & $TunnelClient run --profile-dir (Join-Path $GatewayRoot '.runtime\profiles') --profile home-mcp --log.file=
+} finally {
+    foreach ($Name in $GatewaySavedEnv.Keys) {
+        [Environment]::SetEnvironmentVariable($Name, $GatewaySavedEnv[$Name], 'Process')
+    }
+}
+```
+
+このPowerShellが本体のコンソールです。既存profileはログをファイルへ出すため、`--log.file=`の空値指定で標準出力へ切り替えます。`--log.file stdout`は`stdout`というファイルを作るため使いません。Ctrl+Cで前景実行を終了し、再起動時は同じ手順で `.env` を読み直します。キーの実値を引数に追加する必要はありません。別のprofile名・認証環境変数を使っている場合は、既存profileの参照に合わせてください。
+
+`run` は `runtimes` 管理起動ではないため、管理側の過去の `stopped` 表示や `.runtime\supervisor-status.json` を前景プロセスの生存状態と同一視しません。本体のコンソールとhealth URLで確認してください。ブラウザ管理画面はhealth URLの `/ui` です。最新health URLの保存先はprofileの `health.url_file` で確認できます。
+
+### 非表示のバックグラウンド運用
+
+本体の可視コンソールが不要で、自動起動を設定済みなら、タスクスケジューラの `Home MCP Gateway` タスクを使います。タスクスケジューラで「実行」を選ぶか、次を実行します。
+
+```powershell
+Start-ScheduledTask -TaskName 'Home MCP Gateway'
+```
+
+このタスクの標準Actionは `powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "<repository>\scripts\connect_tunnel.ps1" -Watch` です。非表示で30秒ごとに監視し、異常時に再接続します。タスクが未登録の場合だけ、リポジトリのルートで次を実行して登録します。登録処理はタスクを直ちに起動します。
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install_autostart.ps1
 ```
 
-自動起動を止めるときは、先に `Home MCP Gateway` タスクを無効化または停止してから runtime を停止します。
+起動方式と画面の違いは次のとおりです。
+
+| 入口 | 動作と表示 |
+| --- | --- |
+| `tunnel-client.exe run --profile-dir ... --profile home-mcp --log.file=` | トンネル本体を現在のコンソールで前景実行。上の環境読込が必要 |
+| 登録済み `Home MCP Gateway` タスク | `connect_tunnel.ps1 -Watch` を非表示で継続実行 |
+| `.\scripts\connect_tunnel.ps1` | process modeで接続・状態確認後、プロンプトへ戻る。runtimeは継続する |
+| `.\scripts\connect_tunnel.ps1 -Watch` | 実行したPowerShell画面で監視役を継続。本体は管理対象の別プロセス |
+| `.\scripts\run_gateway.cmd` | stdio Gateway本体の起動。トンネル接続や管理画面を開くバッチではない |
+
+見える専用トンネルウィンドウを開くバッチは、このリポジトリにはありません。`Connected ... using process mode` と `process_running / healthy / ready = True` は、バックグラウンド接続できた状態です。本体を可視起動したという意味ではありません。`connect_tunnel.ps1` の管理画面URLは出力の `ui_url` と `.runtime\supervisor-status.json` に記録されます。Watch画面を閉じることと、管理対象runtimeの停止は別です。
+
+### バックグラウンド運用の状態確認と再起動
+
+以下はリポジトリのルートのPowerShellで実行します。PATHを前提にせず、展開済みの実行ファイルを選びます。`.env` の `TUNNEL_CLIENT_PATH` で別の配置先を指定している場合は、同じフルパスを `$TunnelClient` に設定してください。`.env` の値はPowerShell変数へ自動では読み込まれません。
+
+```powershell
+$TunnelClient = (Get-ChildItem -Path '.\tunnel-client-*\tunnel-client.exe' -File -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+if (-not $TunnelClient) { throw '展開先のtunnel-client.exeのフルパスを $TunnelClient に指定してください。' }
+& $TunnelClient runtimes status home-mcp --json
+```
+
+**`.env`やGatewayコードを変更した後は、接続コマンドの再実行だけでなくruntimeを停止して起動し直します。** 登録済みタスクを使う場合は、監視による再接続を止めてから次の順で操作します（`$TunnelClient` は上で確認した実行ファイルです）。
+
+```powershell
+Stop-ScheduledTask -TaskName 'Home MCP Gateway'
+& $TunnelClient runtimes stop home-mcp
+Start-ScheduledTask -TaskName 'Home MCP Gateway'
+```
+
+起動は非同期です。状態確認で3項目がTrueになることを確認し、ChatGPT側でメタデータを更新してください。手動Watchを使っている場合は先にその監視を終了し、runtime停止後に `.\scripts\connect_tunnel.ps1 -Watch` で再開します。`TUNNEL_ALIAS`を変更している場合は、例の `home-mcp` を実際のaliasに置き換えます。
+
+自動起動も止める場合は、タスクを無効化・停止してからruntimeを停止します。再開時はタスクを有効化して実行してください。
 
 ```powershell
 Disable-ScheduledTask -TaskName 'Home MCP Gateway'
 Stop-ScheduledTask -TaskName 'Home MCP Gateway'
-tunnel-client.exe runtimes stop home-mcp
+& $TunnelClient runtimes stop home-mcp
 ```
-
-再開する場合はタスクを有効化して `connect_tunnel.ps1 -Watch` を起動します。`.env` を変更した後は runtime を停止してから `connect_tunnel.ps1` を再実行し、ChatGPT 側でメタデータを更新してください。
 
 ## AoiTalk（任意）
 
@@ -109,7 +190,9 @@ AoiTalk 連携は初期状態では無効です。有効にする場合は、ロ
 HOME_MCP_AOITALK_ENABLED=1
 ```
 
-AoiTalk 自体が PC にインストール済みで、接続先・認証・必要な機能が設定済みである必要があります。この Gateway は AoiTalk をインストールまたは設定しません。AoiTalk が無効なら **76 tools**、有効なら **84 tools** が公開されます。認証情報を ChatGPT に渡さないでください。
+AoiTalk 自体が PC にインストール済みで、接続先・認証・必要な機能が設定済みである必要があります。この Gateway は AoiTalk をインストールまたは設定しません。AoiTalk が無効なら **76 tools**、有効なら **92 tools** が公開されます。認証情報を ChatGPT に渡さないでください。
+
+CLI継続セッションの接続と動作は [AoiTalk CLI 継続セッション](docs/aoitalk-cli-sessions.md) を参照してください。
 
 ## ツールの概要
 
@@ -123,7 +206,7 @@ AoiTalk 自体が PC にインストール済みで、接続先・認証・必�
 | デスクトップ・端末 | Windows の観測・UI 操作、スクリーンショット（MCPネイティブPNG）、座標系 `screen`/`window`/`normalized` による視覚付き Computer Use（[詳細](docs/computer-use.ja.md)）、Android / ADB |
 | 開発ワークフロー | Git リポジトリ / worktree、長時間ジョブ、ブラウザ（Playwright） |
 | 画像・診断 | 画像コンテキスト、ツール実行のローカル診断ログ |
-| AoiTalk（任意） | クリップ取り込みとローカルタスク委譲。上記の 8 ツールを追加 |
+| AoiTalk（任意） | クリップ取り込み、ローカルタスク委譲、CLI継続セッション。上記の 16 ツールを追加 |
 
 これらのグループにもアクセス制限や read-only 境界が追加されるわけではありません。接続相手とプロンプトを信頼できる範囲に限定してください。
 

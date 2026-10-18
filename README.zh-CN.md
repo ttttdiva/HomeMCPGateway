@@ -57,13 +57,13 @@ Home MCP Gateway 通过 OpenAI Secure MCP Tunnel，把 Windows PC 上运行的�
 
    只有当 PATH 或仓库目录搜索无法找到可执行文件时，才需要设置 `TUNNEL_CLIENT_PATH`。不要把 `.env`、Tunnel ID 或 runtime API key 提交到 Git，也不要放进 ChatGPT 消息或应用配置。
 
-7. 启动连接。
+7. 检查首次连接并创建profile。隧道本体的前台启动方法见下文。
 
    ```powershell
    .\scripts\connect_tunnel.ps1
    ```
 
-   此脚本会启动名为 `home-mcp` 的本地 runtime，并检查 `process_running`、`healthy` 和 `ready`。连接是出站连接，不需要开放入站防火墙端口。
+   此脚本会启动名为 `home-mcp` 的本地 runtime，检查 `process_running`、`healthy` 和 `ready`，然后返回命令提示符。它不会自动打开隧道窗口。连接是出站连接，不需要开放入站防火墙端口。
 
 ## ChatGPT 端设置
 
@@ -74,30 +74,109 @@ Home MCP Gateway 通过 OpenAI Secure MCP Tunnel，把 Windows PC 上运行的�
 
 请参阅官方 [Connect ChatGPT to a remote MCP server 指南](https://developers.openai.com/plugins/deploy/connect-chatgpt)、[Refresh MCP metadata 说明](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata)以及 [Using Projects in ChatGPT 帮助文章](https://help.openai.com/en/articles/10169521-using-projects-in-chatgpt)。
 
-## 启动、自动启动、状态和停止
+## 日常启动、重启与窗口显示
 
-- 普通启动：`.\scripts\connect_tunnel.ps1`
-- 监视并重连：`.\scripts\connect_tunnel.ps1 -Watch`
-- 查看状态：`tunnel-client.exe runtimes status home-mcp --json`
-- 停止 runtime：`tunnel-client.exe runtimes stop home-mcp`
+### 在可见控制台运行隧道本体
 
-如果 `tunnel-client.exe` 不在 PATH 中，请将命令中的可执行文件名替换为解压后的完整路径，或在 `.env` 中设置 `TUNNEL_CLIENT_PATH`。`-Watch` 模式会定期检查并重连不健康的 runtime。
+**要在PowerShell控制台中运行隧道本体，请使用 `tunnel-client.exe run`。** `runtimes connect` 会启动或复用单独管理的进程。`connect_tunnel.ps1 -Watch` 的可见窗口属于监视程序，不是隧道本体的前台控制台。
 
-要启用自动启动和异常重连，请在仓库根目录运行以下命令。它会为当前 Windows 用户安装并立即启动名为 `Home MCP Gateway` 的计划任务：
+以下假定首次连接已创建 `.runtime\profiles\home-mcp.yaml`。先按下文的后台停止步骤，结束同一隧道的监视和runtime，再在仓库根目录打开独立PowerShell；不要同时运行两种模式。
+
+现有profile通过 `env:CONTROL_PLANE_API_KEY` 引用认证信息。`run` 不会加载仓库的 `.env`，而 `connect_tunnel.ps1` 会在结束时恢复调用方环境。以下代码按现有脚本的方式将 `.env` 作为纯文本加载，不显示秘密值，不将其写入命令参数，并在退出时恢复环境：
+
+请在新打开的PowerShell本身中指定安装目录。请将下面的路径改为实际绝对路径。
+
+```powershell
+$GatewayRoot = 'C:\path\to\HomeMCPGateway'
+Set-Location -LiteralPath $GatewayRoot
+if (-not (Test-Path -LiteralPath (Join-Path $GatewayRoot '.env') -PathType Leaf)) { throw 'Gateway .env not found.' }
+$GatewaySavedEnv = @{}
+try {
+    foreach ($Line in [IO.File]::ReadAllLines((Join-Path $GatewayRoot '.env'))) {
+        $Entry = $Line.Trim()
+        if (-not $Entry -or $Entry.StartsWith('#')) { continue }
+        if ($Entry -notmatch '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') { throw 'Invalid .env assignment.' }
+        $Name = $Matches[1]
+        $Value = $Matches[2].Trim()
+        if ($Value.Length -ge 2 -and (($Value.StartsWith('"') -and $Value.EndsWith('"')) -or ($Value.StartsWith("'") -and $Value.EndsWith("'")))) {
+            $Value = $Value.Substring(1, $Value.Length - 2)
+        }
+        if (-not $GatewaySavedEnv.ContainsKey($Name)) {
+            $GatewaySavedEnv[$Name] = [Environment]::GetEnvironmentVariable($Name, 'Process')
+        }
+        [Environment]::SetEnvironmentVariable($Name, $Value, 'Process')
+    }
+    $TunnelClient = $env:TUNNEL_CLIENT_PATH
+    if (-not $TunnelClient) {
+        $TunnelClient = (Get-ChildItem -Path (Join-Path $GatewayRoot 'tunnel-client-*\tunnel-client.exe') -File |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+    }
+    if (-not $TunnelClient -or -not (Test-Path -LiteralPath $TunnelClient -PathType Leaf)) { throw 'Set TUNNEL_CLIENT_PATH in .env.' }
+    if (-not $env:CONTROL_PLANE_API_KEY) { throw 'CONTROL_PLANE_API_KEY is required.' }
+    & $TunnelClient run --profile-dir (Join-Path $GatewayRoot '.runtime\profiles') --profile home-mcp --log.file=
+} finally {
+    foreach ($Name in $GatewaySavedEnv.Keys) {
+        [Environment]::SetEnvironmentVariable($Name, $GatewaySavedEnv[$Name], 'Process')
+    }
+}
+```
+
+此PowerShell就是隧道本体的控制台。现有profile将日志写入文件；使用空值 `--log.file=` 输出到控制台。不要使用 `--log.file stdout`，它会创建名为 `stdout` 的文件。按Ctrl+C结束前台运行，重启时重复该步骤以重新加载 `.env`。不要把秘密值加入命令。如使用其他profile名称或认证环境变量，请按对应profile的引用调整。
+
+直接 `run` 不属于 `runtimes` 管理启动。不要将管理侧旧的 `stopped` 状态或 `.runtime\supervisor-status.json` 当作前台进程的存活状态；应检查本体控制台和health URL。浏览器管理页面是该health URL下的 `/ui`；profile中的 `health.url_file` 指定最新URL的保存位置。
+
+### 隐藏的后台运行
+
+如果不需要隧道本体的可见控制台，且已配置自动启动，可使用现有的 `Home MCP Gateway` 计划任务。在任务计划程序中选择“运行”，或执行：
+
+```powershell
+Start-ScheduledTask -TaskName 'Home MCP Gateway'
+```
+
+任务的默认操作为 `powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "<repository>\scripts\connect_tunnel.ps1" -Watch`。它在隐藏窗口中每30秒检查一次，并在异常时重连。仅在任务尚未注册时，从仓库根目录执行以下命令；注册后会立即启动任务：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install_autostart.ps1
 ```
 
-不要把凭据写入任务参数。停止自动启动的 runtime 时，先禁用或停止 `Home MCP Gateway` 任务，再停止 runtime：
+| 入口 | 行为与显示 |
+| --- | --- |
+| `tunnel-client.exe run --profile-dir ... --profile home-mcp --log.file=` | 在当前控制台前台运行隧道本体；需按上文加载环境 |
+| 现有 `Home MCP Gateway` 任务 | 在隐藏窗口中持续执行 `connect_tunnel.ps1 -Watch` |
+| `.\scripts\connect_tunnel.ps1` | 以process mode连接、检查状态后返回提示符；runtime继续运行 |
+| `.\scripts\connect_tunnel.ps1 -Watch` | 在当前窗口持续执行监视程序；本体是单独管理的进程 |
+| `.\scripts\run_gateway.cmd` | 启动stdio Gateway本体；不会连接隧道或打开管理页面 |
+
+本仓库没有打开独立可见隧道窗口的批处理启动器。显示 `Connected ... using process mode` 且 `process_running / healthy / ready = True` 表示后台连接正常，不代表本体已在可见控制台启动。`connect_tunnel.ps1` 的管理页面URL通过 `ui_url` 输出，并保存在 `.runtime\supervisor-status.json` 中。关闭Watch窗口与停止其管理的runtime是不同操作。
+
+### 后台模式的状态检查与重启
+
+在仓库根目录的PowerShell中执行以下命令。它选择已解压的可执行文件，不依赖PATH。如果 `.env` 的 `TUNNEL_CLIENT_PATH` 指定了其他位置，请将同一完整路径赋给 `$TunnelClient`。PowerShell不会自动将 `.env` 的值读入变量。
+
+```powershell
+$TunnelClient = (Get-ChildItem -Path '.\tunnel-client-*\tunnel-client.exe' -File -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+if (-not $TunnelClient) { throw '请将已解压的tunnel-client.exe完整路径赋给 $TunnelClient。' }
+& $TunnelClient runtimes status home-mcp --json
+```
+
+**修改 `.env` 或Gateway代码后，需要先停止再启动runtime；仅重新执行连接命令不够。** 使用计划任务时，先停止监视，再按以下顺序操作（使用上文已确认的可执行文件）：
+
+```powershell
+Stop-ScheduledTask -TaskName 'Home MCP Gateway'
+& $TunnelClient runtimes stop home-mcp
+Start-ScheduledTask -TaskName 'Home MCP Gateway'
+```
+
+启动是异步的。确认三个状态字段均变为True后，再刷新ChatGPT连接元数据。手动Watch模式下，应先结束监视、停止runtime，再执行 `.\scripts\connect_tunnel.ps1 -Watch`。如已修改 `TUNNEL_ALIAS`，请将示例中的 `home-mcp` 替换为实际alias。
+
+如需同时禁用自动启动，先禁用并停止任务，再停止runtime。恢复时重新启用并运行任务：
 
 ```powershell
 Disable-ScheduledTask -TaskName 'Home MCP Gateway'
 Stop-ScheduledTask -TaskName 'Home MCP Gateway'
-tunnel-client.exe runtimes stop home-mcp
+& $TunnelClient runtimes stop home-mcp
 ```
-
-恢复时重新启用任务并启动 `connect_tunnel.ps1 -Watch`。修改 `.env` 后，先停止 runtime，再重新运行 `connect_tunnel.ps1`，并刷新 ChatGPT 的连接元数据。
 
 ## AoiTalk（可选）
 
@@ -107,7 +186,7 @@ AoiTalk 集成默认关闭。要启用它，请在本地 `.env` 中添加以下�
 HOME_MCP_AOITALK_ENABLED=1
 ```
 
-AoiTalk 本身必须已经安装并在本机配置好，包括端点、认证和所需功能。本 Gateway 不会安装或配置 AoiTalk。默认配置公开 **76 个工具**；启用 AoiTalk 后公开 **84 个工具**。不要将 AoiTalk 凭据发送给 ChatGPT。
+AoiTalk 本身必须已经安装并在本机配置好，包括端点、认证和所需功能。本 Gateway 不会安装或配置 AoiTalk。默认配置公开 **76 个工具**；启用 AoiTalk 后公开 **92 个工具**。不要将 AoiTalk 凭据发送给 ChatGPT。
 
 ## 工具分组
 
@@ -121,7 +200,7 @@ AoiTalk 本身必须已经安装并在本机配置好，包括端点、认证和
 | 桌面与设备 | Windows 观测/UI 操作、截图以及 Android / ADB |
 | 开发工作流 | Git 仓库 / worktree、持久化任务以及浏览器会话（Playwright） |
 | 图像与诊断 | 图像上下文和本地工具计时诊断 |
-| AoiTalk（可选） | 剪辑导入和本地任务委派；增加 8 个工具 |
+| AoiTalk（可选） | 剪辑导入、本地任务委派和 CLI 持续会话；增加 16 个工具 |
 
 这些分组不会额外建立 allowlist 或 read-only 边界。请只将连接和提示交给可信的人和工作流。
 

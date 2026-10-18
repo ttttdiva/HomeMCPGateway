@@ -14,7 +14,7 @@ import anyio
 from mcp.client import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from PIL import Image
-from home_mcp_gateway import android, aoitalk, aoitalk_tasks, browser_qa, desktop, git_qa, image_library, jobs, readiness
+from home_mcp_gateway import android, aoitalk, aoitalk_cli_sessions, aoitalk_tasks, browser_qa, desktop, git_qa, image_library, jobs, readiness
 from home_mcp_gateway import server
 from qa_test_support import local_server
 
@@ -36,7 +36,7 @@ FULL_MCP_BASELINE = {
     "browser_errors", "browser_close", "image_library_register_context",
 }
 
-AOITALK_TOOLS = {fn.__name__ for fn in (*aoitalk.TOOLS, *aoitalk_tasks.TOOLS)}
+AOITALK_TOOLS = {fn.__name__ for fn in (*aoitalk.TOOLS, *aoitalk_tasks.TOOLS, *aoitalk_cli_sessions.TOOLS)}
 
 
 class StdioTests(unittest.TestCase):
