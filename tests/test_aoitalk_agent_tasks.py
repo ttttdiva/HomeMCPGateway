@@ -108,6 +108,19 @@ class API:
             return httpx.Response(202, json={"task": self.view(task), "created": True})
 
         parts = request.url.path.split("/")
+        if len(parts) >= 5 and parts[1:4] == ["api", "local-agent", "tasks"]:
+            task = self.legacy_tasks.get(parts[4])
+            if task is None:
+                return httpx.Response(404, json={"detail": "task not found"})
+            if request.method == "GET" and len(parts) == 5:
+                return httpx.Response(200, json={"task": self.view(task)})
+            if request.method == "GET" and parts[5:] == ["tail"]:
+                return httpx.Response(200, json={"task_id": task["task_id"], "status": task["status"],
+                                                  "events": [{"message": "legacy-event"}],
+                                                  "truncated": False, "event_count": 1})
+            if request.method == "POST" and parts[5:] == ["cancel"]:
+                task["status"] = "cancelled"
+                return httpx.Response(200, json={"task": self.view(task)})
         if len(parts) >= 4 and parts[1:3] == ["api", "agent-tasks"]:
             task = self.tasks.get(parts[3])
             if task is None:
@@ -540,6 +553,91 @@ class AgentTaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("provider", post["body"])
         self.assertNotIn("allow_adb", post["body"])
         self.assertNotIn("allow_git_commit", post["body"])
+
+    async def test_local_task_entry_reads_canonical_task_started_via_agent_id(self):
+        # Reproduction: start(agent_id, provider omitted) created a canonical task,
+        # but local status/tail only queried /api/local-agent/tasks and got 404.
+        started = await legacy_tasks.aoitalk_local_task_start(
+            "read-only check", WORKSPACE, mode="read_only", allow_commands=False,
+            idempotency_key="canonical-readback", agent_id=AGENT_ID,
+        )
+        self.assertEqual(started["executor"], "aoitalk_agent_task")
+        task_id = started["task_id"]
+        task = self.api.tasks[task_id]
+        task.update(status="completed", is_terminal=True, summary_text="final answer 44/15",
+                    result={"final_response": "44/15", "report": {"duplicates": 0}})
+        replay = await legacy_tasks.aoitalk_local_task_start(
+            "read-only check", WORKSPACE, mode="read_only", allow_commands=False,
+            idempotency_key="canonical-readback", agent_id=AGENT_ID,
+        )
+        self.assertEqual((replay["task_id"], replay["created"]), (task_id, False))
+        self.assertEqual(len(self.api.tasks), 1)
+        self.api.calls.clear()
+
+        status = await legacy_tasks.aoitalk_local_task_status(task_id, wait_seconds=0.2)
+        self.assertTrue(status["ok"], status)
+        self.assertEqual(status["status"], "completed")
+        self.assertEqual(status["executor"], "aoitalk_agent_task")
+        self.assertEqual(status["work_id"], "work-123")
+        self.assertEqual(status["agent_run_id"], "run-456")
+        self.assertFalse(status["cancel_requested"])
+        self.assertEqual(status["summary_text"], "final answer 44/15")
+        self.assertEqual(status["result"], {"final_response": "44/15", "report": {"duplicates": 0}})
+        self.assertIn("done", status["next_step"])
+        LegacyTaskReply = importlib.import_module("home_mcp_gateway.aoitalk_task_schema").TaskReply
+        TypeAdapter(LegacyTaskReply).validate_python(status)
+        self.assertEqual([call["path"] for call in self.api.calls], [
+            "/api/auth/login", f"/api/local-agent/tasks/{task_id}", f"/api/agent-tasks/{task_id}",
+        ])
+
+        tail = await legacy_tasks.aoitalk_local_task_tail(task_id, limit=3, max_bytes=2048)
+        self.assertTrue(tail["ok"], tail)
+        self.assertEqual(len(tail["events"]), 3)
+        self.assertEqual(self.api.calls[-1]["path"], f"/api/agent-tasks/{task_id}/tail")
+        self.assertEqual(self.api.calls[-1]["query"], {"limit": ["3"], "max_bytes": ["2048"]})
+        self.assert_private(tail)
+
+        task["status"] = "running"
+        cancelled = await legacy_tasks.aoitalk_local_task_cancel(task_id)
+        self.assertTrue(cancelled["ok"], cancelled)
+        self.assertTrue(cancelled["cancel_requested"])
+        self.assertEqual(self.api.calls[-1]["path"], f"/api/agent-tasks/{task_id}/cancel")
+        self.assertEqual(len(self.api.tasks), 1)
+
+    async def test_local_task_entry_unknown_id_stays_not_found_without_extra_routes(self):
+        unknown = "f" * 32
+        for fn in (legacy_tasks.aoitalk_local_task_status, legacy_tasks.aoitalk_local_task_tail,
+                   legacy_tasks.aoitalk_local_task_cancel):
+            self.api.calls.clear()
+            result = await fn(unknown)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"], "not_found")
+            self.assert_private(result)
+            paths = [call["path"] for call in self.api.calls if call["path"] != "/api/auth/login"]
+            self.assertEqual(len(paths), 2)
+            self.assertTrue(paths[0].startswith(f"/api/local-agent/tasks/{unknown}"))
+            self.assertTrue(paths[1].startswith(f"/api/agent-tasks/{unknown}"))
+
+    async def test_local_task_entry_permission_error_is_not_rerouted(self):
+        self.api.error_response = (403, {"error": "permission_denied"})
+        result = await legacy_tasks.aoitalk_local_task_status("e" * 32)
+        self.assertEqual(result["error"], "permission_denied")
+        self.assertNotIn("/api/agent-tasks/" + "e" * 32, [call["path"] for call in self.api.calls])
+
+    async def test_legacy_local_task_status_tail_cancel_stay_on_legacy_route(self):
+        started = await legacy_tasks.aoitalk_local_task_start("legacy goal", WORKSPACE,
+                                                              idempotency_key="legacy-readback")
+        task_id = started["task_id"]
+        self.api.legacy_tasks[task_id].update(status="completed", summary_text="legacy done")
+        status = await legacy_tasks.aoitalk_local_task_status(task_id)
+        tail = await legacy_tasks.aoitalk_local_task_tail(task_id)
+        self.assertEqual((status["status"], status["executor"], status["summary_text"]),
+                         ("completed", "aoitalk_local", "legacy done"))
+        self.assertEqual(tail["events"], [{"message": "legacy-event"}])
+        self.api.legacy_tasks[task_id]["status"] = "running"
+        cancelled = await legacy_tasks.aoitalk_local_task_cancel(task_id)
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertFalse([call for call in self.api.calls if call["path"].startswith("/api/agent-tasks/")])
 
     async def test_status_wait_and_tail_values_are_bounded(self):
         started = await self.start(idempotency_key="bounded-task")

@@ -226,7 +226,7 @@ def _sanitize(value: Any, settings: aoitalk.Settings) -> Any:
         "integration", "llm_calls", "tool_calls", "tool_requests", "tool_failures", "blocked_calls",
         "commands_failed", "files_written",
     }
-    secret_key = re.compile(r"(?i)(?:password|passwd|cookie|authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|secret|base64)")
+    secret_key = re.compile(r"(?i)(?:password|passwd|cookie|authorization|api[_-]?key|private[_-]?key|access[_-]?token|refresh[_-]?token|secret|base64)")
 
     def public_value(key: str, item: Any) -> bool:
         if not isinstance(item, str):
@@ -350,6 +350,40 @@ def _task(data: dict[str, Any]) -> dict[str, Any]:
     return task
 
 
+def _canonical_task(data: dict[str, Any]) -> dict[str, Any]:
+    """Map a canonical /api/agent-tasks projection onto the local-task reply fields."""
+    task = data.get("task")
+    if not isinstance(task, dict):
+        raise TaskError("invalid_response")
+    task = dict(task)
+    if "work_item_id" in task:
+        task["work_id"] = task.pop("work_item_id")
+    if "cancellation_requested" in task:
+        task["cancel_requested"] = task.pop("cancellation_requested")
+    task["executor"] = "aoitalk_agent_task"
+    return _task({"task": task})
+
+
+async def _task_call(client: TaskClient, method: str, task_id: str, suffix: str = "",
+                     canonical: bool | None = None, **kwargs: Any) -> tuple[bool, dict[str, Any]]:
+    """Read an existing task id from the API that owns it; returns (canonical, data).
+
+    start routes agent_id-without-provider submissions to the canonical Agent
+    task API, so a local-task 404 is retried once at the canonical route for
+    the same id and the same authenticated requester. AoiTalk still enforces
+    ownership there; both 404s stay not_found.
+    """
+    if canonical is not True:
+        try:
+            _, data = await client.call(method, f"/api/local-agent/tasks/{task_id}{suffix}", **kwargs)
+            return False, data
+        except TaskError as exc:
+            if exc.code != "not_found" or canonical is False:
+                raise
+    _, data = await client.call(method, f"/api/agent-tasks/{task_id}{suffix}", **kwargs)
+    return True, data
+
+
 def _next_step(task: dict[str, Any]) -> str:
     if task.get("status") in TERMINAL:
         return "done: read summary_text/result; call aoitalk_local_task_tail only if details are needed"
@@ -401,8 +435,8 @@ async def aoitalk_local_task_start(
     Agent; omission requires an explicitly configured delegation default.
     provider/model/effort are expectations checked against its pinned revision,
     never silent route overrides. When agent_id is supplied and provider is
-    omitted, the generic canonical Agent task API is used; poll it with
-    aoitalk_agent_task_status. Calls without agent_id or with an explicit
+    omitted, the generic canonical Agent task API is used; the local-task
+    status/tail/cancel tools also resolve that task_id. Calls without agent_id or with an explicit
     legacy provider keep the local-task API. For initial read-only checks explicitly pass
     allow_commands=false: host commands are not an OS sandbox. Omission is
     passed through so canonical execution defaults to false while an explicitly
@@ -482,7 +516,8 @@ async def aoitalk_local_task_start(
                 "mode": mode,
                 "agent_id": routed.get("agent_id", agent_id),
                 "next_step": (
-                    "poll aoitalk_agent_task_status(task_id); do not start a duplicate task"
+                    "poll aoitalk_local_task_status(task_id) or aoitalk_agent_task_status(task_id); "
+                    "do not start a duplicate task"
                 ),
             }
             for name in ("agent_revision_id", "agent_run_id"):
@@ -522,7 +557,11 @@ def _compact(task: dict[str, Any]) -> dict[str, Any]:
             "baseline", "llm", "is_terminal")
     result = {**_identity(task), **{key: task[key] for key in keep if key in task}}
     detail = task.get("result")
-    if isinstance(detail, dict):
+    if task.get("executor") == "aoitalk_agent_task" and "result" in task:
+        # Canonical result projections are owned by AoiTalk; pass them through
+        # (bounded by _sanitize) instead of narrowing to legacy report keys.
+        result["result"] = detail
+    elif isinstance(detail, dict):
         result["result"] = {key: detail.get(key) for key in (
             "stopped_reason", "rounds", "report", "report_parsed", "checks", "git", "commands") if key in detail}
     return result
@@ -543,9 +582,10 @@ async def aoitalk_local_task_status(task_id: TaskId, wait_seconds: Annotated[flo
 
         async def read(client: TaskClient) -> dict[str, Any]:
             deadline = time.monotonic() + wait_seconds
+            canonical: bool | None = None
             while True:
-                _, data = await client.call("GET", f"/api/local-agent/tasks/{task_id}")
-                task = _task(data)
+                canonical, data = await _task_call(client, "GET", task_id, canonical=canonical)
+                task = _canonical_task(data) if canonical else _task(data)
                 if task["task_id"] != task_id:
                     raise TaskError("invalid_response")
                 if task["status"] in TERMINAL or time.monotonic() >= deadline:
@@ -572,8 +612,8 @@ async def aoitalk_local_task_tail(task_id: TaskId, limit: Annotated[int, Field(g
         max_bytes = int(_number(max_bytes, 1024, 64000, "max_bytes"))
 
         async def read(client: TaskClient) -> dict[str, Any]:
-            _, data = await client.call("GET", f"/api/local-agent/tasks/{task_id}/tail",
-                                        params={"limit": limit, "max_bytes": max_bytes})
+            _, data = await _task_call(client, "GET", task_id, "/tail",
+                                       params={"limit": limit, "max_bytes": max_bytes})
             events = data.get("events")
             if data.get("task_id") != task_id or not isinstance(data.get("status"), str) or data.get("status") not in STATES or not isinstance(events, list):
                 raise TaskError("invalid_response")
@@ -598,8 +638,8 @@ async def aoitalk_local_task_cancel(task_id: TaskId) -> dict[str, Any]:
         state["task_id"] = task_id
 
         async def cancel(client: TaskClient) -> dict[str, Any]:
-            _, data = await client.call("POST", f"/api/local-agent/tasks/{task_id}/cancel")
-            task = _task(data)
+            canonical, data = await _task_call(client, "POST", task_id, "/cancel")
+            task = _canonical_task(data) if canonical else _task(data)
             if task["task_id"] != task_id:
                 raise TaskError("invalid_response")
             return {"ok": True, **_compact(task), "next_step": _next_step(task)}
