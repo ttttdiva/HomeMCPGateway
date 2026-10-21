@@ -244,7 +244,46 @@ def _status(task: Any, *, expected_id: str | None = None) -> dict[str, Any]:
                        "summary_text", "failure_reason", "failure_detail"} and not isinstance(task[key], str):
                 raise AgentTaskError("invalid_response")
             result[key] = task[key]
+    if task.get("failure") is not None:
+        result["failure"] = _failure(task["failure"])
     return result
+
+
+def _failure(value: Any) -> dict[str, Any]:
+    """Rebuild 41's failure summary from an allowlist.
+
+    Only framework-authored codes and tool names are kept; tool arguments and
+    output are never copied. Optional details are clipped or dropped instead of
+    raising, so a malformed detail never hides that the task failed.
+    """
+    if not isinstance(value, dict):
+        raise AgentTaskError("invalid_response")
+
+    def code(item: Any, limit: int = 160) -> str | None:
+        # Over-long values are dropped, not clipped: a clipped secret would
+        # no longer match _sanitize's exact-match redaction.
+        if not isinstance(item, str) or len(item) > limit:
+            return None
+        return "".join(c for c in item if ord(c) >= 32)
+
+    def names(item: Any) -> list[str]:
+        if not isinstance(item, list):
+            return []
+        return [name for name in (code(entry, 80) for entry in item[:50]) if name]
+
+    unresolved = []
+    entries = value.get("unresolved_tools")
+    for entry in (entries[:50] if isinstance(entries, list) else []):
+        if isinstance(entry, dict):
+            unresolved.append({"tool": code(entry.get("tool"), 80), "denied": entry.get("denied") is True,
+                               "reason": code(entry.get("reason"))})
+    count = value.get("successful_tool_count")
+    return {
+        "reason": code(value.get("reason"), 96),
+        "unresolved_tools": unresolved,
+        "successful_tool_count": count if isinstance(count, int) and not isinstance(count, bool) else 0,
+        "successful_tools": names(value.get("successful_tools")),
+    }
 
 
 def _sanitize(value: Any, settings: aoitalk.Settings) -> dict[str, Any]:

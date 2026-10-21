@@ -29,6 +29,7 @@ class AgentTaskFields(TypedDict, total=False):
     failure_detail: str
     progress: Any
     result: Any
+    failure: dict[str, Any] | None
 
 
 class BusinessReply(TypedDict, total=False):

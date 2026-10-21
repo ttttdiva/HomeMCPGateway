@@ -379,7 +379,7 @@ class AgentTaskTests(unittest.IsolatedAsyncioTestCase):
                 return False
 
         coordinator = InactiveCoordinator()
-        owner_id = "00000000-0000-4000-8000-000000000001"
+        owner_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
         config = {"local_agent_tasks": {"allowed_roots": [str(source_root)]}}
         app = FastAPI()
         captured_requests: list[dict] = []
@@ -689,6 +689,47 @@ class AgentTaskTests(unittest.IsolatedAsyncioTestCase):
         for args in ({"limit": 0}, {"limit": 201}, {"max_bytes": 1023}, {"max_bytes": 64001}):
             self.assertEqual((await tasks.aoitalk_agent_task_tail(task_id, **args))["error"], "invalid_input")
         self.assertEqual(len(self.api.calls), before)
+
+    async def test_status_relays_secret_free_failure_detail(self):
+        task_id = (await self.start(idempotency_key="failure-task"))["task_id"]
+        task = self.api.tasks[task_id]
+        task["status"] = "failed"
+        task["is_terminal"] = True
+        task["failure"] = {
+            "reason": "task_unresolved_tool_failure",
+            "unresolved_tools": [
+                {"tool": "get_repo_map", "denied": True, "reason": "agent_authority_denied",
+                 "arguments": {"api_key": "hidden"}, "output": PASSWORD},
+                {"tool": "bm25_search", "denied": False, "reason": "tool_execution_failed"},
+            ],
+            "successful_tool_count": 94,
+            "successful_tools": ["read_file"],
+        }
+        status = await tasks.aoitalk_agent_task_status(task_id)
+        self.assertEqual(status["status"], "failed")
+        self.assertEqual(status["failure"]["reason"], "task_unresolved_tool_failure")
+        self.assertEqual(status["failure"]["unresolved_tools"], [
+            {"tool": "get_repo_map", "denied": True, "reason": "agent_authority_denied"},
+            {"tool": "bm25_search", "denied": False, "reason": "tool_execution_failed"},
+        ])
+        self.assertEqual(status["failure"]["successful_tool_count"], 94)
+        self.assertNotIn(PASSWORD, json.dumps(status))
+        self.assertNotIn("hidden", json.dumps(status))
+        TypeAdapter(TaskReply).validate_python(status)
+
+        task["failure"]["successful_tools"] = ["t" * 81]
+        task["failure"]["unresolved_tools"] = {"tool": "x"}
+        degraded = await tasks.aoitalk_agent_task_status(task_id)
+        self.assertEqual(degraded["status"], "failed")
+        self.assertEqual(degraded["failure"]["successful_tools"], [])
+        task["failure"]["reason"] = "x" * 150 + "p4ssw0rd-secret"
+        long_reason = await tasks.aoitalk_agent_task_status(task_id)
+        self.assertIsNone(long_reason["failure"]["reason"])
+        self.assertNotIn("p4ssw0rd", json.dumps(long_reason))
+        self.assertEqual(degraded["failure"]["unresolved_tools"], [])
+
+        task["failure"] = "not-a-dict"
+        self.assertEqual((await tasks.aoitalk_agent_task_status(task_id))["error"], "invalid_response")
 
     async def test_cancel_is_only_a_request_until_status_confirms_stop(self):
         started = await self.start(idempotency_key="cancel-task")
