@@ -20,9 +20,8 @@ import time
 import uuid
 from typing import Annotated, Any, Literal
 
-from pydantic import Field
-
 import httpx
+from pydantic import Field
 
 from . import aoitalk
 
@@ -401,7 +400,10 @@ async def aoitalk_local_task_start(
     the same task instead of a duplicate. agent_id selects a canonical AoiTalk
     Agent; omission requires an explicitly configured delegation default.
     provider/model/effort are expectations checked against its pinned revision,
-    never silent route overrides. For initial read-only checks explicitly pass
+    never silent route overrides. When agent_id is supplied and provider is
+    omitted, the generic canonical Agent task API is used; poll it with
+    aoitalk_agent_task_status. Calls without agent_id or with an explicit
+    legacy provider keep the local-task API. For initial read-only checks explicitly pass
     allow_commands=false: host commands are not an OS sandbox. Omission is
     passed through so canonical execution defaults to false while an explicitly
     selected legacy execution path retains its existing server-side default.
@@ -433,6 +435,64 @@ async def aoitalk_local_task_start(
         for name, value in (("agent_id", agent_id), ("provider", provider), ("model", model), ("effort", effort)):
             if value is not None:
                 body[name] = _optional_text(value, name)
+
+        if agent_id is not None and provider is None:
+            legacy_only_options = (
+                allow_adb,
+                allow_git_commit,
+                max_tool_rounds,
+                timeout_sec,
+                command_timeout_sec,
+                expected_branch,
+            )
+            if any(value not in (None, False) for value in legacy_only_options):
+                raise TaskError(
+                    "invalid_input",
+                    detail=(
+                        "agent_id with omitted provider uses the canonical Agent API; "
+                        "ADB, Git commit, timeout, max_tool_rounds and expected_branch "
+                        "options are not supported on that route"
+                    ),
+                )
+
+            from . import aoitalk_agent_tasks
+
+            routed = await aoitalk_agent_tasks.aoitalk_agent_task_start(
+                goal=goal,
+                workspace=workspace,
+                agent_id=agent_id,
+                idempotency_key=key,
+                constraints=constraints,
+                completion_criteria=completion_criteria,
+                mode=mode,
+                allow_commands=allow_commands is True,
+                provider=None,
+                model=model,
+                effort=effort,
+            )
+            if not routed.get("ok"):
+                return routed
+            result = {
+                "ok": True,
+                "task_id": routed["task_id"],
+                "status": routed["status"],
+                "created": routed.get("created", False),
+                "executor": "aoitalk_agent_task",
+                "workspace": workspace,
+                "mode": mode,
+                "agent_id": routed.get("agent_id", agent_id),
+                "next_step": (
+                    "poll aoitalk_agent_task_status(task_id); do not start a duplicate task"
+                ),
+            }
+            for name in ("agent_revision_id", "agent_run_id"):
+                if routed.get(name) is not None:
+                    result[name] = routed[name]
+            if routed.get("work_item_id") is not None:
+                result["work_id"] = routed["work_item_id"]
+            if routed.get("idempotency_key") is not None:
+                result["idempotency_key"] = routed["idempotency_key"]
+            return result
 
         async def submit(client: TaskClient) -> dict[str, Any]:
             nonlocal post_attempted

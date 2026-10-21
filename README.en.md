@@ -186,7 +186,7 @@ AoiTalk integration is disabled by default. To enable it, add this to the local 
 HOME_MCP_AOITALK_ENABLED=1
 ```
 
-AoiTalk itself must already be installed and configured locally, including its endpoint, authentication, and required features. This gateway does not install or configure AoiTalk. The default configuration exposes **76 tools**; enabling AoiTalk exposes **92 tools**. Never send AoiTalk credentials to ChatGPT.
+AoiTalk itself must already be installed and configured locally, including its endpoint, authentication, and required features. This gateway does not install or configure AoiTalk. The default configuration exposes **76 tools**; enabling AoiTalk exposes **96 tools**. Never send AoiTalk credentials to ChatGPT.
 
 ## Tool groups
 

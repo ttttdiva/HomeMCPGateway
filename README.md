@@ -190,9 +190,11 @@ AoiTalk 連携は初期状態では無効です。有効にする場合は、ロ
 HOME_MCP_AOITALK_ENABLED=1
 ```
 
-AoiTalk 自体が PC にインストール済みで、接続先・認証・必要な機能が設定済みである必要があります。この Gateway は AoiTalk をインストールまたは設定しません。AoiTalk が無効なら **76 tools**、有効なら **92 tools** が公開されます。認証情報を ChatGPT に渡さないでください。
+AoiTalk 自体が PC にインストール済みで、接続先・認証・必要な機能が設定済みである必要があります。この Gateway は AoiTalk をインストールまたは設定しません。AoiTalk が無効なら **76 tools**、有効なら **96 tools** が公開されます。認証情報を ChatGPT に渡さないでください。
 
 CLI継続セッションの接続と動作は [AoiTalk CLI 継続セッション](docs/aoitalk-cli-sessions.md) を参照してください。
+
+Agent task bridge の設定と read-only ツールは [AoiTalk Agent Task Bridge](docs/aoitalk-agent-task-bridge.md) を参照してください。
 
 ## ツールの概要
 

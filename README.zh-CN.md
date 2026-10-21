@@ -186,7 +186,7 @@ AoiTalk 集成默认关闭。要启用它，请在本地 `.env` 中添加以下�
 HOME_MCP_AOITALK_ENABLED=1
 ```
 
-AoiTalk 本身必须已经安装并在本机配置好，包括端点、认证和所需功能。本 Gateway 不会安装或配置 AoiTalk。默认配置公开 **76 个工具**；启用 AoiTalk 后公开 **92 个工具**。不要将 AoiTalk 凭据发送给 ChatGPT。
+AoiTalk 本身必须已经安装并在本机配置好，包括端点、认证和所需功能。本 Gateway 不会安装或配置 AoiTalk。默认配置公开 **76 个工具**；启用 AoiTalk 后公开 **96 个工具**。不要将 AoiTalk 凭据发送给 ChatGPT。
 
 ## 工具分组
 

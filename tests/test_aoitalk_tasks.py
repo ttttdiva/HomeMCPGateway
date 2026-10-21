@@ -215,10 +215,13 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
 
 
     async def test_same_key_rejects_semantically_different_requests(self):
-        first = await self.start(idempotency_key="route-key")
-        for change in ({"agent_id": "other-agent"}, {"model": "other-model"},
+        agent_id = str(uuid4())
+        first = await self.start(idempotency_key="route-key", agent_id=agent_id,
+                                 provider="openai_compatible_local")
+        for change in ({"agent_id": str(uuid4())}, {"model": "other-model"},
                        {"workspace": "C:\\different"}, {"allow_commands": False}, {"mode": "mutate"}):
-            result = await self.start(idempotency_key="route-key", **change)
+            arguments = {"agent_id": agent_id, "provider": "openai_compatible_local", **change}
+            result = await self.start(idempotency_key="route-key", **arguments)
             self.assertEqual(result["error"], "idempotency_conflict")
             self.assertEqual(result["idempotency_key"], "route-key")
             self.assertFalse(result["submission_uncertain"])

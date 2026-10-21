@@ -14,8 +14,9 @@ from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
 from dotenv import dotenv_values
 
-from . import core, aoitalk, aoitalk_cli_sessions, aoitalk_tasks, image_library, local_plan
+from . import core, aoitalk, aoitalk_agent_tasks, aoitalk_cli_sessions, aoitalk_tasks, image_library, local_plan
 from .aoitalk_task_schema import structured_task_tool
+from .aoitalk_agent_task_schema import structured_agent_task_tool
 from .aoitalk_cli_session_schema import structured_cli_session_tool
 from . import android, browser_qa, desktop, git_qa, jobs, readiness, telemetry
 from .qa_common import register_tools
@@ -288,6 +289,17 @@ if _aoitalk_enabled():
             idempotent_hint=True,
             open_world_hint=not read_only,
         ))(structured_task_tool(instrument_tool(function)))
+
+    # Generic API-Agent tasks are only forwarded over the authenticated HTTP
+    # client. AoiTalk owns their runtime and provider selection.
+    for function in aoitalk_agent_tasks.TOOLS:
+        read_only = function in aoitalk_agent_tasks.READ_ONLY_TOOLS
+        mcp.tool(annotations=ToolAnnotations(
+            read_only_hint=read_only,
+            destructive_hint=not read_only,
+            idempotent_hint=True,
+            open_world_hint=not read_only,
+        ))(structured_agent_task_tool(instrument_tool(function)))
 
     # CLI continuation sessions are owned by AoiTalk.  The Gateway only
     # forwards bounded requests/results and never starts a provider process.
