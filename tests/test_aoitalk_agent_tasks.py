@@ -604,6 +604,25 @@ class AgentTaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.api.calls[-1]["path"], f"/api/agent-tasks/{task_id}/cancel")
         self.assertEqual(len(self.api.tasks), 1)
 
+    async def test_local_task_status_schema_accepts_null_result_in_every_state(self):
+        # Regression: running canonical tasks carry result=None, which the published
+        # legacy TaskReply schema rejected (INVALID_ARGUMENT on status only).
+        LegacyTaskReply = importlib.import_module("home_mcp_gateway.aoitalk_task_schema").TaskReply
+        started = await legacy_tasks.aoitalk_local_task_start(
+            "read-only check", WORKSPACE, mode="read_only", allow_commands=False,
+            idempotency_key="canonical-null-result", agent_id=AGENT_ID,
+        )
+        task_id = started["task_id"]
+        terminal = {"completed", "failed", "cancelled"}
+        for state in ("queued", "running", "waiting", "failed", "cancelled", "completed"):
+            self.api.tasks[task_id].update(status=state, is_terminal=state in terminal, result=None)
+            status = await legacy_tasks.aoitalk_local_task_status(task_id)
+            self.assertTrue(status["ok"], (state, status))
+            self.assertEqual(status["status"], state)
+            TypeAdapter(LegacyTaskReply).validate_python(status)
+            self.assertIsNone(status["result"], state)
+        self.assertEqual(len(self.api.tasks), 1)
+
     async def test_local_task_entry_unknown_id_stays_not_found_without_extra_routes(self):
         unknown = "f" * 32
         for fn in (legacy_tasks.aoitalk_local_task_status, legacy_tasks.aoitalk_local_task_tail,

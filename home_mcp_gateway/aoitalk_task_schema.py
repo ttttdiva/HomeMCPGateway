@@ -56,20 +56,20 @@ class TaskFields(TypedDict, total=False):
     seconds_since_progress: float | None
     current_step: str | None
     latest_activity: Any
-    counters: dict[str, int]
-    changed_files: list[str]
-    cancel_requested: bool
+    counters: dict[str, int] | None
+    changed_files: list[str] | None
+    cancel_requested: bool | None
     failure_reason: str | None
     failure_detail: str | None
     summary_text: str | None
     completion_summary: str | None
-    stalled: bool
-    worker_alive: bool
-    stall_threshold_sec: float
+    stalled: bool | None
+    worker_alive: bool | None
+    stall_threshold_sec: float | None
     baseline: dict[str, Any] | None
     llm: dict[str, Any] | None
-    is_terminal: bool
-    result: TaskResult
+    is_terminal: bool | None
+    result: TaskResult | None
 
 
 class BusinessReply(TypedDict, total=False):
