@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
 import inspect
 import json
 import os
@@ -19,7 +20,9 @@ from pydantic import TypeAdapter, ValidationError
 from home_mcp_gateway import aoitalk
 from home_mcp_gateway import aoitalk_agent_tasks as tasks
 from home_mcp_gateway import aoitalk_tasks as legacy_tasks
-from home_mcp_gateway.aoitalk_agent_task_schema import StartReply, TailReply, TaskReply
+from home_mcp_gateway.aoitalk_agent_task_schema import (
+    ResultReply, StartReply, TailReply, TaskReply, structured_agent_task_tool,
+)
 
 USER = "fixture-user"
 PASSWORD = "fixture-password-${LITERAL}-#-秘密"
@@ -785,6 +788,252 @@ class AgentTaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["submission_uncertain"])
         self.assertNotIn("detail", result)
         self.assert_private(result)
+
+    async def test_status_preserves_result_code_and_reports_exact_string_clipping(self):
+        task_id = (await self.start())["task_id"]
+        code = 'def hello():\r\n\tif True:\r\n\t\treturn "秘密😀e\u0301"\r\n'
+        task = self.api.tasks[task_id]
+        task.update(status="completed", result={"response": code}, summary_text="a\r\n\tb")
+        reply = await tasks.aoitalk_agent_task_status(task_id)
+        self.assertEqual(reply["result"]["response"], code)
+        self.assertEqual(reply["summary_text"], "ab")
+        self.assertNotIn("output_truncated", reply)
+        compile(reply["result"]["response"], "<answer>", "exec")
+        for size in (3999, 4000, 4001, 33000, 48000):
+            with self.subTest(size=size):
+                task["result"]["response"] = "x" * size
+                reply = await tasks.aoitalk_agent_task_status(task_id)
+                self.assertEqual(len(reply["result"]["response"]), min(size, 4000))
+                self.assertEqual(reply.get("output_truncated", False), size > 4000)
+        # The display helper remains byte-for-byte compatible for short UI/errors.
+        self.assertEqual(aoitalk._safe_text("a\r\n\tb\x00" + PASSWORD, SETTINGS), "ab[redacted]")
+
+    async def test_final_result_reconstructs_large_unicode_code_with_stable_digest(self):
+        task_id = (await self.start())["task_id"]
+        code = 'def hello():\r\n\treturn "日本語😀e\u0301"\r\n' * 1500
+        self.assertGreater(len(code), 33000)
+        self.api.tasks[task_id].update(status="completed", result={
+            "response": code, "reasoning": "hidden reasoning", "logs": ["raw log"],
+            "api_key": "hidden-api-key"}, progress={"trace": "private trace"})
+        pages, offset, digest = [], 0, None
+        while True:
+            reply = await tasks.aoitalk_agent_task_result(task_id, offset, 3799, digest)
+            self.assertTrue(reply["ok"], reply)
+            TypeAdapter(ResultReply).validate_python(reply)
+            self.assertEqual(reply["offset"], offset)
+            self.assertEqual(reply["total_chars"], len(code))
+            self.assertEqual(reply["total_bytes"], len(code.encode("utf-8")))
+            self.assertEqual(reply["content_sha256"], hashlib.sha256(code.encode("utf-8")).hexdigest())
+            self.assertTrue(reply["output_truncated"])
+            encoded = json.dumps(reply, ensure_ascii=False).encode("utf-8")
+            self.assertLessEqual(len(encoded), tasks.MAX_OUTPUT_BYTES)
+            for hidden in ("hidden reasoning", "raw log", "private trace", "hidden-api-key"):
+                self.assertNotIn(hidden, encoded.decode())
+            pages.append(reply["content"])
+            digest = reply["content_sha256"]
+            if reply["next_offset"] is None:
+                break
+            offset = reply["next_offset"]
+        self.assertEqual("".join(pages), code)
+        repeat = await tasks.aoitalk_agent_task_result(task_id, 0, 3799, digest)
+        self.assertEqual(repeat["content"], pages[0])
+        self.assertTrue(all(call["method"] == "GET" for call in self.api.calls[2:]
+                            if call["path"] != "/api/auth/login"))
+
+    async def test_result_redacts_full_secrets_before_splitting_at_every_boundary(self):
+        task_id = (await self.start())["task_id"]
+        secrets = (PASSWORD, USER, "Bearer abcdefghijklmnop", "aoitpat_fixture-token",
+                   "sk-fixture-token", "token=cross-page-token", "api_key=hidden-api-key",
+                   "private_key=hidden-private-key", "session=fixture")
+        for secret in secrets:
+            for split in range(1, len(secret)):
+                with self.subTest(secret_type=secret.split("=")[0][:8], split=split):
+                    prefix = "x" * (40 - split) + " "
+                    raw = prefix + secret + "\r\n\tend秘密😀"
+                    expected = prefix + "[redacted]\r\n\tend秘密😀"
+                    self.api.tasks[task_id].update(status="completed", result={"response": raw})
+                    first = await tasks.aoitalk_agent_task_result(task_id, limit=41)
+                    content = first["content"]
+                    if first["next_offset"] is not None:
+                        second = await tasks.aoitalk_agent_task_result(
+                            task_id, first["next_offset"], 8000, first["content_sha256"])
+                        content += second["content"]
+                    self.assertEqual(content, expected)
+                    self.assertEqual(first["content_sha256"], hashlib.sha256(expected.encode()).hexdigest())
+        # Credentials are redacted before ordinary status clipping too.
+        self.api.tasks[task_id]["result"] = {"response": "x" * 3998 + PASSWORD + " end"}
+        status = await tasks.aoitalk_agent_task_status(task_id)
+        self.assertEqual(status["result"]["response"], "x" * 3998 + "[r")
+        self.assertTrue(status["output_truncated"])
+
+    async def test_result_exact_page_boundaries_empty_text_and_legacy_final_answer(self):
+        task_id = (await self.start())["task_id"]
+        for size in (0, 1, 3999, 4000, 4001, 7999, 8000, 8001):
+            with self.subTest(size=size):
+                text = "界" * size
+                self.api.tasks[task_id].update(status="succeeded", result={"final_response": text})
+                page = await tasks.aoitalk_agent_task_result(task_id, limit=4000)
+                self.assertTrue(page["ok"], page)
+                self.assertEqual(page["content"], text[:4000])
+                self.assertEqual(page["next_offset"], 4000 if size > 4000 else None)
+                self.assertEqual(page["output_truncated"], size > 4000)
+                end = await tasks.aoitalk_agent_task_result(task_id, size, 1, page["content_sha256"])
+                self.assertEqual(end["content"], "")
+                self.assertIsNone(end["next_offset"])
+                past_end = await tasks.aoitalk_agent_task_result(task_id, size + 1, 1, page["content_sha256"])
+                self.assertEqual(past_end["error"], "invalid_input")
+
+    async def test_result_validates_inputs_before_http_and_never_reuses_changed_content(self):
+        task_id = (await self.start())["task_id"]
+        before = len(self.api.calls)
+        for bad_id in ("", "../" + task_id, "A" * 32, "a" * 31, task_id + "\n", None, 42):
+            reply = await tasks.aoitalk_agent_task_result(bad_id)
+            self.assertEqual(reply["error"], "invalid_input")
+        for args in ({"offset": -1}, {"offset": True}, {"offset": 1.5}, {"offset": "0"},
+                     {"offset": tasks.MAX_RESPONSE_BYTES + 1}, {"offset": 1},
+                     {"limit": 0}, {"limit": 8001}, {"limit": True}, {"limit": 1.5},
+                     {"expected_digest": "g" * 64}, {"expected_digest": 42}):
+            self.assertEqual((await tasks.aoitalk_agent_task_result(task_id, **args))["error"], "invalid_input")
+        self.assertEqual(len(self.api.calls), before)
+        self.api.tasks[task_id].update(status="completed", result={"response": "first answer"})
+        first = await tasks.aoitalk_agent_task_result(task_id, limit=3)
+        self.api.tasks[task_id]["result"]["response"] = "changed answer"
+        changed = await tasks.aoitalk_agent_task_result(task_id, 3, 3, first["content_sha256"])
+        self.assertEqual(changed["error"], "result_changed")
+        self.assertNotIn("content", changed)
+
+    async def test_result_rejects_wrong_tasks_statuses_and_non_final_fields(self):
+        task_id = (await self.start())["task_id"]
+        task = self.api.tasks[task_id]
+        for status in ("queued", "running", "waiting", "failed", "cancelled", "stopped", "interrupted", "unknown"):
+            task.update(status=status, result={"response": "not final"})
+            reply = await tasks.aoitalk_agent_task_result(task_id)
+            self.assertEqual(reply["error"], "result_not_ready")
+            self.assertNotIn("content", reply)
+        task.update(status="completed", is_terminal=False)
+        self.assertEqual((await tasks.aoitalk_agent_task_result(task_id))["error"], "invalid_response")
+        task["is_terminal"] = True
+        for bad_id in ("b" * 32, "invalid", None):
+            task["task_id"] = bad_id
+            self.assertEqual((await tasks.aoitalk_agent_task_result(task_id))["error"], "invalid_response")
+        task["task_id"] = task_id
+        for result, error in ((None, "result_unavailable"), ({}, "result_unavailable"),
+                              ({"reasoning": "hidden", "logs": ["raw"]}, "result_unavailable"),
+                              ({"response": None, "final_response": "do not fall back"}, "invalid_response"),
+                              ("not a result object", "invalid_response")):
+            task["result"] = result
+            reply = await tasks.aoitalk_agent_task_result(task_id)
+            self.assertEqual(reply["error"], error)
+            self.assertNotIn("content", reply)
+        task["status"] = "bad\nstatus"
+        self.assertEqual((await tasks.aoitalk_agent_task_result(task_id))["error"], "invalid_response")
+
+    async def test_result_response_caps_and_worst_case_json_page_size(self):
+        task_id = (await self.start())["task_id"]
+        task = self.api.tasks[task_id]
+        # The wire cap includes ALL fields, even those not returned by this tool.
+        task.update(status="completed", result={"response": "safe", "logs": "x" * tasks.MAX_RESPONSE_BYTES})
+        self.assertEqual((await tasks.aoitalk_agent_task_result(task_id))["error"], "invalid_response")
+        task["result"] = {"response": '\\"\t\r\n界😀' * 9000}
+        page = await tasks.aoitalk_agent_task_result(task_id, limit=8000)
+        self.assertTrue(page["ok"], page)
+        self.assertEqual(len(page["content"]), 8000)
+        self.assertLessEqual(len(json.dumps(page, ensure_ascii=False).encode()), tasks.MAX_OUTPUT_BYTES)
+        # Exercise exact HTTP cap, not just a grossly oversized response.
+        task["result"] = {"response": ""}
+        overhead = len(json.dumps({"task": self.api.view(task)}, ensure_ascii=False, separators=(",", ":")).encode())
+        task["result"]["response"] = "x" * (tasks.MAX_RESPONSE_BYTES - overhead)
+        self.assertTrue((await tasks.aoitalk_agent_task_result(task_id))["ok"])
+        task["result"]["response"] += "x"
+        self.assertEqual((await tasks.aoitalk_agent_task_result(task_id))["error"], "invalid_response")
+        # Escaped lone surrogates are legal JSON, but not valid UTF-8 answer text.
+        task["result"]["response"] = "safe"
+        raw = json.dumps({"task": self.api.view(task)}).replace('"safe"', '"\\ud800"').encode()
+        with patch.object(tasks.AgentTaskClient, "call", return_value=(200, json.loads(raw))):
+            self.assertEqual((await tasks.aoitalk_agent_task_result(task_id))["error"], "invalid_response")
+
+    async def test_result_mcp_schema_and_envelope_preserve_content(self):
+        task_id = (await self.start())["task_id"]
+        code = 'def hello():\r\n\treturn "😀"\r\n' * 200
+        self.api.tasks[task_id].update(status="completed", result={"response": code})
+        tool = structured_agent_task_tool(tasks.aoitalk_agent_task_result)
+        reply = await tool(task_id=task_id, limit=8000)
+        self.assertEqual(reply.structured_content["content"], code)
+        self.assertEqual(json.loads(reply.content[0].text), reply.structured_content)
+        self.assertIn(tasks.aoitalk_agent_task_result, tasks.TOOLS)
+        self.assertIn(tasks.aoitalk_agent_task_result, tasks.READ_ONLY_TOOLS)
+
+    def test_sanitizer_marks_key_and_byte_clipping_and_keeps_redaction(self):
+        for raw in ({"summary_text": "界" * 4001}, {"result": {"response": "\\\t\r\n😀" * 4000}},
+                    {"k" * 101: "v"}, {"result": ["界" * 4000] * 20}):
+            reply = tasks._sanitize(raw, SETTINGS)
+            self.assertTrue(reply["output_truncated"])
+            self.assertLessEqual(len(json.dumps(reply, ensure_ascii=False).encode()), tasks.MAX_OUTPUT_BYTES)
+        reply = tasks._sanitize({"result": {"response": PASSWORD + " token=hidden-api-key\n",
+                                            "api_key": "hidden-api-key"}}, SETTINGS)
+        self.assert_private(reply)
+
+    async def test_result_roundtrip_over_real_stdio_and_fixture_http(self):
+        import tempfile
+        import anyio
+        from mcp.client import ClientSession
+        from mcp.client.stdio import StdioServerParameters, stdio_client
+        from test_aoitalk_tasks import fixture_server
+
+        task_id = (await self.start())["task_id"]
+        text = 'def hello():\r\n\treturn "日本語😀"\r\n' * 350
+        self.api.tasks[task_id].update(status="completed", result={"response": text})
+        api = self.api
+
+        class WireAPI:
+            def route(self, method, path, headers, body, query):
+                response = api.handler(httpx.Request(method, "http://fixture" + path,
+                                                     headers=headers, json=body))
+                cookies = {"Set-Cookie": response.headers["set-cookie"]} if "set-cookie" in response.headers else {}
+                return response.status_code, response.json(), cookies
+
+        with tempfile.TemporaryDirectory() as cwd, fixture_server(WireAPI()) as url:
+            env_file = Path(cwd) / "fixture.env"
+            env_file.write_text(f"AOITALK_BOOTSTRAP_ADMIN_USERNAME={USER}\n"
+                                f"AOITALK_BOOTSTRAP_ADMIN_PASSWORD='{PASSWORD}'\n", encoding="utf-8")
+            params = StdioServerParameters(
+                command=sys.executable,
+                args=[str(Path(__file__).resolve().parents[1] / "scripts" / "gateway_stdio.py")],
+                cwd=cwd, env={"HOME_MCP_AOITALK_ENABLED": "true", "HOME_MCP_AOITALK_URL": url,
+                              "HOME_MCP_AOITALK_ENV_FILE": str(env_file), "HOME_MCP_TOOL_LOG": "0"},
+            )
+            with anyio.fail_after(30):
+                async with stdio_client(params) as (read, write):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        # Exercise SDK validation, which runs before the function's
+                        # manual guards. Coercing bool/string/float to int would
+                        # otherwise allow a login and task GET here.
+                        before = len(api.calls)
+                        digest = hashlib.sha256(text.encode()).hexdigest()
+                        for parameter in ("offset", "limit"):
+                            for malformed in (False, True, "0", "1", 0.0, 1.0):
+                                with self.subTest(parameter=parameter, malformed=repr(malformed)):
+                                    response = await session.call_tool("aoitalk_agent_task_result", {
+                                        "task_id": task_id, "expected_digest": digest,
+                                        parameter: malformed,
+                                    })
+                                    self.assertTrue(response.is_error, response)
+                                    self.assertEqual(len(api.calls), before,
+                                                     "Malformed types must fail before login/GET")
+                        parts, args = [], {"task_id": task_id, "limit": 8000}
+                        while True:
+                            response = await session.call_tool("aoitalk_agent_task_result", args)
+                            self.assertFalse(response.is_error, response)
+                            page = response.structured_content
+                            self.assertTrue(page["ok"], page)
+                            self.assertEqual(json.loads(response.content[0].text), page)
+                            parts.append(page["content"])
+                            if page["next_offset"] is None:
+                                break
+                            args.update(offset=page["next_offset"], expected_digest=page["content_sha256"])
+                        self.assertEqual("".join(parts), text)
+                        self.assertEqual(hashlib.sha256("".join(parts).encode()).hexdigest(), page["content_sha256"])
 
     async def test_invalid_inputs_do_not_make_http_calls(self):
         for args in (

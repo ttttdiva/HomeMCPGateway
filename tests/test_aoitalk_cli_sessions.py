@@ -801,12 +801,20 @@ class StdioCliSessionTests(unittest.TestCase):
                         listing = {tool.name: tool for tool in (await session.list_tools()).tools}
                         expected = {fn.__name__ for fn in cli.TOOLS}
                         self.assertTrue(expected <= set(listing))
-                        # 92 pre-existing tools plus the four generic Agent task tools.
+                        # 92 pre-existing tools plus the generic Agent task tools.
                         agent_task_tools = {"aoitalk_agent_task_start", "aoitalk_agent_task_status",
-                                            "aoitalk_agent_task_tail", "aoitalk_agent_task_cancel"}
+                                            "aoitalk_agent_task_tail", "aoitalk_agent_task_result",
+                                            "aoitalk_agent_task_cancel"}
                         self.assertEqual(agent_task_tools, {fn.__name__ for fn in agent_tasks.TOOLS})
                         self.assertTrue(agent_task_tools <= set(listing))
                         self.assertEqual(len(listing), 92 + len(agent_task_tools))
+                        result_tool = listing["aoitalk_agent_task_result"]
+                        self.assertTrue(result_tool.annotations.read_only_hint)
+                        self.assertFalse(result_tool.annotations.destructive_hint)
+                        self.assertEqual(result_tool.input_schema["required"], ["task_id"])
+                        self.assertEqual(result_tool.input_schema["properties"]["limit"]["maximum"], 8000)
+                        self.assertEqual(result_tool.output_schema["properties"]["content"]["type"], "string")
+                        self.assertIn("content_sha256", result_tool.output_schema["properties"])
                         for name in expected:
                             self.assertEqual(listing[name].output_schema["type"], "object")
                             self.assertIn("ok", listing[name].output_schema["required"])

@@ -6,6 +6,7 @@ execution and provider routing remain owned by AoiTalk.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import re
@@ -31,6 +32,8 @@ MAX_REQUIRED_OUTPUTS = 20
 MAX_REQUIRED_OUTPUT_LENGTH = 512
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_OUTPUT_BYTES = 64 * 1024
+MAX_RESULT_PAGE_CHARS = 8000  # Even JSON-escaped controls fit the output byte cap.
+DIGEST_RE = re.compile(r"^[a-f0-9]{64}$")
 MAX_WAIT_SECONDS = 20.0
 POLL_INTERVAL = 1.0
 TERMINAL_STATES = {"completed", "succeeded", "failed", "cancelled", "stopped", "interrupted"}
@@ -60,6 +63,9 @@ MESSAGES = {
     "server_error": "AoiTalkのAPIがエラーを返しました。AoiTalk側のログを確認してください。",
     "connection_error": "AoiTalkへ接続できません。AoiTalkの起動状態と接続先を確認してください。",
     "invalid_response": "AoiTalkの応答を検証できません。",
+    "result_not_ready": "taskは正常完了していません。statusを確認してください。",
+    "result_unavailable": "taskに取得可能な最終回答がありません。",
+    "result_changed": "最終回答が変更されました。先頭ページから取得し直してください。",
     "agent_not_configured": "AoiTalk側で対象Agentを確認してください。",
     "agent_not_found": "指定したAgentが見つかりません。",
     "agent_inactive": "指定したAgentは無効です。",
@@ -173,7 +179,7 @@ class AgentTaskClient(aoitalk.Client):
             raise AgentTaskError(code, exc.http_status) from None
 
 
-async def _session(fn):
+async def _session(fn, *, sanitize: bool = True):
     try:
         settings = aoitalk.load_settings()
     except aoitalk.ClipError:
@@ -181,7 +187,8 @@ async def _session(fn):
     client = AgentTaskClient(settings)
     try:
         await client.login_task()
-        return _sanitize(await fn(client), settings)
+        result = await fn(client)
+        return _sanitize(result, settings) if sanitize else result
     finally:
         await client.http.aclose()
 
@@ -326,6 +333,12 @@ def _failure(value: Any) -> dict[str, Any]:
     }
 
 
+def _redact_result_text(value: str, settings: aoitalk.Settings) -> str:
+    # Apply the existing secret patterns to the WHOLE string, never a slice.
+    clean = aoitalk._redact_text(SECRET_VALUE.sub("[redacted]", value), settings)
+    return "".join(c for c in clean if c >= " " or c in "\r\n\t")
+
+
 def _sanitize(value: Any, settings: aoitalk.Settings) -> dict[str, Any]:
     # Reserve space for the top-level ``output_truncated`` marker and JSON
     # separators; each value/key below is charged by its encoded JSON bytes.
@@ -336,7 +349,7 @@ def _sanitize(value: Any, settings: aoitalk.Settings) -> dict[str, Any]:
     def encoded_size(item: Any) -> int:
         return len(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
-    def visit(item: Any, depth: int = 0) -> Any:
+    def visit(item: Any, depth: int = 0, *, result_text: bool = False) -> Any:
         nonlocal remaining, truncated
         if remaining <= 0:
             truncated = True
@@ -345,8 +358,13 @@ def _sanitize(value: Any, settings: aoitalk.Settings) -> dict[str, Any]:
             truncated = True
             return "[truncated]"
         if isinstance(item, str):
-            clean = SECRET_VALUE.sub("[redacted]", item)
-            clean = aoitalk._safe_text(clean, settings, min(4000, remaining))
+            clean = _redact_result_text(item, settings)
+            if not result_text:
+                # Preserve short UI/error display behavior, including control removal.
+                clean = "".join(c for c in clean if c >= " ")
+            if len(clean) > 4000:
+                clean = clean[:4000]
+                truncated = True
             if encoded_size(clean) > remaining:
                 low, high = 0, len(clean)
                 while low < high:
@@ -376,7 +394,7 @@ def _sanitize(value: Any, settings: aoitalk.Settings) -> dict[str, Any]:
                 if remaining <= 0:
                     truncated = True
                     break
-                safe = visit(child, depth + 1)
+                safe = visit(child, depth + 1, result_text=result_text)
                 if safe is not omitted:
                     output.append(safe)
             if len(item) > len(output):
@@ -395,11 +413,13 @@ def _sanitize(value: Any, settings: aoitalk.Settings) -> dict[str, Any]:
                 if output:
                     remaining -= 1  # comma
                 clean_key = key[:100]
+                if clean_key != key:
+                    truncated = True
                 remaining -= encoded_size(clean_key) + 1  # key plus colon
                 if remaining <= 0:
                     truncated = True
                     break
-                safe = visit(child, depth + 1)
+                safe = visit(child, depth + 1, result_text=result_text or (depth == 0 and key == "result"))
                 if safe is not omitted:
                     output[clean_key] = safe
             return output
@@ -566,7 +586,12 @@ async def aoitalk_agent_task_status(
     task_id: Annotated[str, Field(pattern=r"^[a-f0-9]{32}$")],
     wait_seconds: Annotated[float, Field(ge=0, le=20)] = 0,
 ) -> dict[str, Any]:
-    """Read one generic AoiTalk Agent task with an optional bounded wait (0-20 seconds)."""
+    """Read task status with an optional wait (0-20 seconds).
+
+    Result previews preserve formatting but strings are capped at 4,000 chars.
+    Use aoitalk_agent_task_result for a complete successful final answer when
+    output_truncated is true.
+    """
     state: dict[str, Any] = {}
     try:
         task_id = _task_id(task_id)
@@ -624,6 +649,84 @@ async def aoitalk_agent_task_tail(
         return _error(exc, **state)
 
 
+async def aoitalk_agent_task_result(
+    task_id: Annotated[str, Field(pattern=r"^[a-f0-9]{32}$")],
+    offset: Annotated[int, Field(strict=True, ge=0, le=MAX_RESPONSE_BYTES)] = 0,
+    limit: Annotated[int, Field(strict=True, ge=1, le=MAX_RESULT_PAGE_CHARS)] = 4000,
+    expected_digest: Annotated[str | None, Field(pattern=r"^[a-f0-9]{64}$")] = None,
+) -> dict[str, Any]:
+    """Read only a successful task's final answer, preserving CRLF, tabs and Unicode.
+
+    Offsets/limits count Python Unicode characters in the fully redacted text.
+    Start at offset=0, then pass next_offset and content_sha256 as expected_digest
+    until next_offset is null. Verify the reconstructed UTF-8 SHA-256 digest.
+    Continuations require the digest; a changed result must be read from zero.
+    Only result.response (or legacy result.final_response) is eligible. No logs,
+    progress, failure answers, tool output or reasoning fields are returned.
+    Each call re-reads the authenticated task; no local task/result cache is used.
+    """
+    state: dict[str, Any] = {}
+    try:
+        task_id = _task_id(task_id)
+        state["task_id"] = task_id
+        if (isinstance(offset, bool) or not isinstance(offset, int)
+                or not 0 <= offset <= MAX_RESPONSE_BYTES
+                or isinstance(limit, bool) or not isinstance(limit, int)
+                or not 1 <= limit <= MAX_RESULT_PAGE_CHARS
+                or (expected_digest is not None and (
+                    not isinstance(expected_digest, str) or not DIGEST_RE.fullmatch(expected_digest)))
+                or (offset > 0 and expected_digest is None)):
+            raise AgentTaskError("invalid_input")
+
+        async def read(client: AgentTaskClient) -> dict[str, Any]:
+            _, data = await client.call("GET", f"/api/agent-tasks/{task_id}")
+            task = _response_task(data, expected_id=task_id)
+            if task["status"] not in {"completed", "succeeded"}:
+                raise AgentTaskError("result_not_ready")
+            if task.get("is_terminal") is False:
+                raise AgentTaskError("invalid_response")
+            result = task.get("result")
+            if result is None:
+                raise AgentTaskError("result_unavailable")
+            if not isinstance(result, dict):
+                raise AgentTaskError("invalid_response")
+            field = "response" if "response" in result else "final_response"
+            if field not in result:
+                raise AgentTaskError("result_unavailable")
+            if not isinstance(result[field], str):
+                raise AgentTaskError("invalid_response")
+            clean = _redact_result_text(result[field], client.settings)
+            try:
+                content_bytes = clean.encode("utf-8")
+            except UnicodeError:
+                raise AgentTaskError("invalid_response") from None
+            if len(content_bytes) > MAX_RESPONSE_BYTES:
+                raise AgentTaskError("invalid_response")
+            digest = hashlib.sha256(content_bytes).hexdigest()
+            if expected_digest is not None and expected_digest != digest:
+                raise AgentTaskError("result_changed")
+            if offset > len(clean):
+                raise AgentTaskError("invalid_input")
+            end = min(offset + limit, len(clean))
+            page = {
+                "ok": True, "task_id": task_id, "status": task["status"],
+                "content": clean[offset:end], "content_sha256": digest,
+                "total_chars": len(clean), "total_bytes": len(content_bytes),
+                "offset": offset, "next_offset": end if end < len(clean) else None,
+                "output_truncated": offset > 0 or end < len(clean),
+            }
+            if len(json.dumps(page, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > MAX_OUTPUT_BYTES:
+                raise AgentTaskError("invalid_response")
+            return page
+
+        # The allowlisted envelope is bounded above and its one content string
+        # is already fully redacted. Re-sanitizing individual pages could change
+        # their text/digest or miss a secret spanning page boundaries.
+        return await _session(read, sanitize=False)
+    except AgentTaskError as exc:
+        return _error(exc, **state)
+
+
 async def aoitalk_agent_task_cancel(
     task_id: Annotated[str, Field(pattern=r"^[a-f0-9]{32}$")],
 ) -> dict[str, Any]:
@@ -648,5 +751,5 @@ async def aoitalk_agent_task_cancel(
 
 
 TOOLS = [aoitalk_agent_task_start, aoitalk_agent_task_status,
-         aoitalk_agent_task_tail, aoitalk_agent_task_cancel]
-READ_ONLY_TOOLS = {aoitalk_agent_task_status, aoitalk_agent_task_tail}
+         aoitalk_agent_task_tail, aoitalk_agent_task_result, aoitalk_agent_task_cancel]
+READ_ONLY_TOOLS = {aoitalk_agent_task_status, aoitalk_agent_task_tail, aoitalk_agent_task_result}

@@ -186,7 +186,7 @@ AoiTalk 集成默认关闭。要启用它，请在本地 `.env` 中添加以下�
 HOME_MCP_AOITALK_ENABLED=1
 ```
 
-AoiTalk 本身必须已经安装并在本机配置好，包括端点、认证和所需功能。本 Gateway 不会安装或配置 AoiTalk。默认配置公开 **76 个工具**；启用 AoiTalk 后公开 **96 个工具**。不要将 AoiTalk 凭据发送给 ChatGPT。
+AoiTalk 本身必须已经安装并在本机配置好，包括端点、认证和所需功能。本 Gateway 不会安装或配置 AoiTalk。默认配置公开 **76 个工具**；启用 AoiTalk 后公开 **97 个工具**。不要将 AoiTalk 凭据发送给 ChatGPT。
 
 ## 工具分组
 
@@ -200,7 +200,7 @@ AoiTalk 本身必须已经安装并在本机配置好，包括端点、认证和
 | 桌面与设备 | Windows 观测/UI 操作、截图以及 Android / ADB |
 | 开发工作流 | Git 仓库 / worktree、持久化任务以及浏览器会话（Playwright） |
 | 图像与诊断 | 图像上下文和本地工具计时诊断 |
-| AoiTalk（可选） | 剪辑导入、本地任务委派和 CLI 持续会话；增加 16 个工具 |
+| AoiTalk（可选） | 剪辑导入、本地/API Agent 任务委派与最终回答获取，以及 CLI 持续会话；增加 21 个工具 |
 
 这些分组不会额外建立 allowlist 或 read-only 边界。请只将连接和提示交给可信的人和工作流。
 

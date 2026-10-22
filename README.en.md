@@ -186,7 +186,7 @@ AoiTalk integration is disabled by default. To enable it, add this to the local 
 HOME_MCP_AOITALK_ENABLED=1
 ```
 
-AoiTalk itself must already be installed and configured locally, including its endpoint, authentication, and required features. This gateway does not install or configure AoiTalk. The default configuration exposes **76 tools**; enabling AoiTalk exposes **96 tools**. Never send AoiTalk credentials to ChatGPT.
+AoiTalk itself must already be installed and configured locally, including its endpoint, authentication, and required features. This gateway does not install or configure AoiTalk. The default configuration exposes **76 tools**; enabling AoiTalk exposes **97 tools**. Never send AoiTalk credentials to ChatGPT.
 
 ## Tool groups
 
@@ -200,7 +200,7 @@ The default configuration exposes 76 tools. The main groups are:
 | Desktop and devices | Windows observation/UI actions, screenshots, and Android / ADB |
 | Development workflows | Git repositories / worktrees, persistent jobs, and browser sessions (Playwright) |
 | Images and diagnostics | Image context plus local tool-timing diagnostics |
-| AoiTalk (optional) | Clip ingestion, local task delegation, and CLI continuation sessions; adds 16 tools |
+| AoiTalk (optional) | Clip ingestion, local/API Agent task delegation and final-answer retrieval, and CLI continuation sessions; adds 21 tools |
 
 These groups do not create an allowlist or a read-only boundary. Limit connections and prompts to people and workflows you trust.
 

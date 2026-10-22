@@ -62,10 +62,22 @@ class TailReply(BusinessReply, total=False):
     event_count: int | None
 
 
+class ResultReply(BusinessReply, total=False):
+    task_id: str
+    status: str
+    content: str
+    content_sha256: str
+    total_chars: int
+    total_bytes: int
+    offset: int
+    next_offset: int | None
+
+
 REPLIES = {
     "aoitalk_agent_task_start": StartReply,
     "aoitalk_agent_task_status": TaskReply,
     "aoitalk_agent_task_tail": TailReply,
+    "aoitalk_agent_task_result": ResultReply,
     "aoitalk_agent_task_cancel": TaskReply,
 }
 

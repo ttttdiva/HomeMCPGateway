@@ -190,11 +190,10 @@ AoiTalk 連携は初期状態では無効です。有効にする場合は、ロ
 HOME_MCP_AOITALK_ENABLED=1
 ```
 
-AoiTalk 自体が PC にインストール済みで、接続先・認証・必要な機能が設定済みである必要があります。この Gateway は AoiTalk をインストールまたは設定しません。AoiTalk が無効なら **76 tools**、有効なら **96 tools** が公開されます。認証情報を ChatGPT に渡さないでください。
+AoiTalk 自体が PC にインストール済みで、接続先・認証・必要な機能が設定済みである必要があります。この Gateway は AoiTalk をインストールまたは設定しません。AoiTalk が無効なら **76 tools**、有効なら **97 tools** が公開されます。認証情報を ChatGPT に渡さないでください。
 
-CLI継続セッションの接続と動作は [AoiTalk CLI 継続セッション](docs/aoitalk-cli-sessions.md) を参照してください。
-
-Agent task bridge の設定と read-only ツールは [AoiTalk Agent Task Bridge](docs/aoitalk-agent-task-bridge.md) を参照してください。
+正準 Agent / Qwen route の選択、read-only stdio scope、接続・検証・OFFへの戻し方は
+[Agent 委譲の接続手順](docs/aoitalk-agent-delegation.md) を参照してください。
 
 ## ツールの概要
 
@@ -208,7 +207,7 @@ Agent task bridge の設定と read-only ツールは [AoiTalk Agent Task Bridge
 | デスクトップ・端末 | Windows の観測・UI 操作、スクリーンショット（MCPネイティブPNG）、座標系 `screen`/`window`/`normalized` による視覚付き Computer Use（[詳細](docs/computer-use.ja.md)）、Android / ADB |
 | 開発ワークフロー | Git リポジトリ / worktree、長時間ジョブ、ブラウザ（Playwright） |
 | 画像・診断 | 画像コンテキスト、ツール実行のローカル診断ログ |
-| AoiTalk（任意） | クリップ取り込み、ローカルタスク委譲、CLI継続セッション。上記の 16 ツールを追加 |
+| AoiTalk（任意） | クリップ取り込み、ローカル／API Agentタスク委譲・最終回答取得、CLI継続セッション。21 ツールを追加 |
 
 これらのグループにもアクセス制限や read-only 境界が追加されるわけではありません。接続相手とプロンプトを信頼できる範囲に限定してください。
 

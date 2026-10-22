@@ -141,14 +141,19 @@ def _error(exc: ClipError, **state: Any) -> dict[str, Any]:
     return result
 
 
-def _safe_text(value: Any, settings: Settings, limit: int = 300) -> str:
+def _redact_text(value: Any, settings: Settings) -> str:
+    """Redact a full string before any display clipping or result paging."""
     if not isinstance(value, str):
         return ""
-    # Only selected display fields are returned; never echo raw HTTP/error bodies.
     for secret in (settings.password, settings.username):
         if secret:
             value = value.replace(secret, "[redacted]")
-    value = re.sub(r"(?i)\b(?:bearer\s+|aoitpat_|sk-)[^\s]+", "[redacted]", value)
+    return re.sub(r"(?i)\b(?:bearer\s+|aoitpat_|sk-)[^\s]+", "[redacted]", value)
+
+
+def _safe_text(value: Any, settings: Settings, limit: int = 300) -> str:
+    # Only selected display fields are returned; never echo raw HTTP/error bodies.
+    value = _redact_text(value, settings)
     return "".join(c for c in value if c >= " ")[:limit]
 
 
