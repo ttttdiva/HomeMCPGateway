@@ -227,6 +227,56 @@ class CliSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(self.api.create_bodies[-1]["permission_mode"], "accept_edits")
 
+    async def test_allowed_capabilities_forwarded_exactly_and_omitted_by_default(self):
+        result = await cli.aoitalk_cli_session_create(
+            AGENT_ID, "claude-cli", "claude-sonnet", WORKSPACE, "cap-1",
+            allowed_capabilities=["workspace_read"],
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.api.create_bodies[-1]["allowed_capabilities"], ["workspace_read"])
+        self.assertEqual(result["idempotency_key"], "cap-1")
+        await cli.aoitalk_cli_session_create(AGENT_ID, "claude-cli", "claude-sonnet", WORKSPACE, "cap-2")
+        self.assertNotIn("allowed_capabilities", self.api.create_bodies[-1])
+
+    async def test_invalid_allowed_capabilities_rejected_before_network(self):
+        before = len(self.api.calls)
+        for bad in ([], ["root"], ["workspace_read", "bogus"], "workspace_read", [None], [1]):
+            result = await cli.aoitalk_cli_session_create(
+                AGENT_ID, "claude-cli", "m", WORKSPACE, "cap-bad", allowed_capabilities=bad
+            )
+            self.assertEqual(result["error"], "invalid_input", bad)
+        self.assertEqual(len(self.api.calls), before)
+
+    async def test_execution_profile_id_omitted_by_default_and_null_is_identical(self):
+        await cli.aoitalk_cli_session_create(AGENT_ID, "claude-cli", "claude-sonnet", WORKSPACE, "prof-0")
+        omitted = dict(self.api.create_bodies[-1])
+        await cli.aoitalk_cli_session_create(
+            AGENT_ID, "claude-cli", "claude-sonnet", WORKSPACE, "prof-0", execution_profile_id=None,
+        )
+        self.assertNotIn("execution_profile_id", omitted)
+        self.assertEqual(self.api.create_bodies[-1], omitted)
+
+    async def test_execution_profile_id_forwarded_trimmed_with_idempotency_and_capabilities(self):
+        result = await cli.aoitalk_cli_session_create(
+            AGENT_ID, "claude-cli", "claude-sonnet", WORKSPACE, "prof-1",
+            allowed_capabilities=["workspace_read"], execution_profile_id="  profile-abc  ",
+        )
+        self.assertTrue(result["ok"], result)
+        body = self.api.create_bodies[-1]
+        self.assertEqual(body["execution_profile_id"], "profile-abc")
+        self.assertEqual(body["allowed_capabilities"], ["workspace_read"])
+        self.assertEqual(body["idempotency_key"], "prof-1")
+        self.assertEqual(result["idempotency_key"], "prof-1")
+
+    async def test_invalid_execution_profile_id_rejected_before_network(self):
+        before = len(self.api.calls)
+        for bad in ("", "   ", "x" * 129, 1, ["p"], {"id": "p"}, "a\nb"):
+            result = await cli.aoitalk_cli_session_create(
+                AGENT_ID, "claude-cli", "m", WORKSPACE, "prof-bad", execution_profile_id=bad
+            )
+            self.assertEqual(result["error"], "invalid_input", bad)
+        self.assertEqual(len(self.api.calls), before)
+
     async def test_mock_non_codex_session_workflow_forwards_synthetic_repository_without_spawning_cli(self):
         scratch_root = Path(__file__).resolve().parents[1] / ".local"
         scratch_root.mkdir(parents=True, exist_ok=True)
@@ -831,6 +881,10 @@ class StdioCliSessionTests(unittest.TestCase):
                             create_schema["properties"]["permission_mode"]["enum"],
                             ["native_default", "standard", "accept_edits"],
                         )
+                        self.assertIn("allowed_capabilities", create_schema["properties"])
+                        self.assertNotIn("allowed_capabilities", create_schema["required"])
+                        self.assertIn("execution_profile_id", create_schema["properties"])
+                        self.assertNotIn("execution_profile_id", create_schema["required"])
                         self.assertTrue(listing["aoitalk_cli_session_status"].annotations.read_only_hint)
                         self.assertTrue(listing["aoitalk_cli_session_reconnect"].annotations.read_only_hint)
                         self.assertFalse(listing["aoitalk_cli_session_send"].annotations.read_only_hint)

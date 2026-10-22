@@ -23,6 +23,7 @@ SESSION_ID_RE = re.compile(SESSION_ID_PATTERN)
 CURSOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~:/+=-]{0,511}$")
 PROVIDERS = {"codex-cli", "claude-cli", "grok-cli", "antigravity-cli"}
 PERMISSION_MODES = {"native_default", "standard", "accept_edits"}
+CLI_CAPABILITIES = ("command_execute", "workspace_read", "workspace_write")
 PRIVATE_HANDLE_KEYS = frozenset({
     "native_handle",
     "native_session_id",
@@ -506,8 +507,18 @@ async def aoitalk_cli_session_create(
     effort: Annotated[str | None, Field(max_length=40)] = None,
     title: Annotated[str | None, Field(max_length=200)] = None,
     permission_mode: Literal["native_default", "standard", "accept_edits"] = "native_default",
+    allowed_capabilities: Annotated[
+        list[Literal["command_execute", "workspace_read", "workspace_write"]] | None,
+        Field(min_length=1, max_length=3),
+    ] = None,
+    execution_profile_id: Annotated[str | None, Field(min_length=1, max_length=128)] = None,
 ) -> dict[str, Any]:
-    """Create a durable AoiTalk CLI continuation session; never starts a local CLI here."""
+    """Create a durable AoiTalk CLI continuation session; never starts a local CLI here.
+
+    allowed_capabilities optionally narrows the session to a nonempty subset of the Agent's
+    capability ceiling; omit it to keep the service default.
+    execution_profile_id optionally selects an AoiTalk execution profile by opaque id; omit it
+    (or pass null) to keep the service default. The Gateway only forwards it."""
     state = {"idempotency_key": idempotency_key}
     attempted = False
     try:
@@ -524,6 +535,18 @@ async def aoitalk_cli_session_create(
         body: dict[str, Any] = {"agent_id": agent_id, "provider": provider, "model": model,
                                 "working_directory": workspace, "idempotency_key": key,
                                 "permission_mode": permission_mode}
+        if allowed_capabilities is not None:
+            if (not isinstance(allowed_capabilities, list) or not 1 <= len(allowed_capabilities) <= 3
+                    or any(not isinstance(item, str) or item not in CLI_CAPABILITIES
+                           for item in allowed_capabilities)):
+                raise CliSessionError("invalid_input",
+                                      detail="allowed_capabilities must be 1-3 known capabilities")
+            body["allowed_capabilities"] = list(allowed_capabilities)
+        if execution_profile_id is not None:
+            if not isinstance(execution_profile_id, str):
+                raise CliSessionError("invalid_input", detail="execution_profile_id must be a string")
+            body["execution_profile_id"] = _bounded_text(
+                execution_profile_id.strip(), "execution_profile_id", 128, allow_newlines=False)
         if effort is not None:
             body["effort"] = _bounded_text(effort, "effort", 40)
         if title is not None:
