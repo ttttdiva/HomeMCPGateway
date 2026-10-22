@@ -27,6 +27,8 @@ MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
 EFFORT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,39}$")
 CAPABILITY_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 STATUS_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+MAX_REQUIRED_OUTPUTS = 20
+MAX_REQUIRED_OUTPUT_LENGTH = 512
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_OUTPUT_BYTES = 64 * 1024
 MAX_WAIT_SECONDS = 20.0
@@ -90,17 +92,30 @@ SECRET_VALUE = re.compile(
 )
 
 
+SERVER_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+SERVER_DETAIL_LIMIT = 300
+
+
 class AgentTaskError(Exception):
-    def __init__(self, code: str, http_status: int | None = None):
+    def __init__(self, code: str, http_status: int | None = None, *,
+                 server_code: str | None = None, server_detail: str | None = None):
         super().__init__(MESSAGES.get(code, MESSAGES["server_error"]))
         self.code = code if code in MESSAGES else "server_error"
         self.http_status = http_status
+        self.server_code = server_code
+        self.server_detail = server_detail
 
 
 def _error(exc: AgentTaskError, **state: Any) -> dict[str, Any]:
     result: dict[str, Any] = {"ok": False, "error": exc.code, "message": MESSAGES[exc.code], **state}
     if exc.http_status is not None:
         result["http_status"] = exc.http_status
+        # Distinguish a refusal the server named from one inferred from the HTTP status alone.
+        result["error_source"] = "server_error_code" if exc.server_code else "http_status_only"
+    if exc.server_code:
+        result["server_error_code"] = exc.server_code
+    if exc.server_detail:
+        result["server_detail"] = exc.server_detail
     return result
 
 
@@ -135,9 +150,20 @@ class AgentTaskClient(aoitalk.Client):
         code = {400: "invalid_input", 401: "authentication_failed", 403: "permission_denied",
                 404: "not_found", 409: "conflict", 422: "invalid_input", 429: "rate_limited"}.get(
                     status, "server_error")
-        if isinstance(data, dict) and data.get("error") in SERVER_CODES:
-            code = data["error"]
-        raise AgentTaskError(code, status)
+        server_code = server_detail = None
+        if isinstance(data, dict):
+            raw_code = data.get("error")
+            if isinstance(raw_code, str) and SERVER_CODE_RE.fullmatch(raw_code):
+                server_code = raw_code
+                if raw_code in SERVER_CODES:
+                    code = raw_code
+            raw_detail = data.get("detail")
+            # Only authorization refusals carry fixed server-authored text; other
+            # statuses may wrap provider exceptions, so their detail stays hidden.
+            if status == 403 and isinstance(raw_detail, str):
+                clean = SECRET_VALUE.sub("[redacted]", raw_detail)
+                server_detail = aoitalk._safe_text(clean, self.settings, SERVER_DETAIL_LIMIT) or None
+        raise AgentTaskError(code, status, server_code=server_code, server_detail=server_detail)
 
     async def login_task(self) -> None:
         try:
@@ -211,6 +237,20 @@ def _text_list(value: Any, name: str, *, max_items: int, max_length: int,
     if pattern and any(not pattern.fullmatch(item) for item in result):
         raise AgentTaskError("invalid_input")
     return result
+
+
+def _required_outputs(value: Any, name: str = "required_outputs") -> list[str]:
+    """Validate workspace-relative paths; omitted and empty both mean none."""
+    outputs = _text_list(value, name, max_items=MAX_REQUIRED_OUTPUTS,
+                         max_length=MAX_REQUIRED_OUTPUT_LENGTH)
+    for item in outputs:
+        parts = item.replace("\\", "/").split("/")
+        if (item != item.strip() or item.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", item)
+                or any(part in {"", ".", ".."} for part in parts)):
+            raise AgentTaskError("invalid_input")
+    if len(set(outputs)) != len(outputs):
+        raise AgentTaskError("invalid_input")
+    return outputs
 
 
 def _status(task: Any, *, expected_id: str | None = None) -> dict[str, Any]:
@@ -396,6 +436,11 @@ async def aoitalk_agent_task_start(
     effort: Annotated[str | None, Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,39}$")] = None,
     required_capabilities: Annotated[list[Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")]] | None,
                                     Field(max_length=20)] = None,
+    required_outputs: Annotated[list[Annotated[str, Field(min_length=1, max_length=512)]] | None,
+                                Field(max_length=20)] = None,
+    edit_targets: Annotated[list[Annotated[str, Field(min_length=1, max_length=512)]] | None,
+                            Field(max_length=20)] = None,
+    requires_command_verification: StrictBool | None = None,
 ) -> dict[str, Any]:
     """Submit a generic AoiTalk Agent task and return its task_id immediately.
 
@@ -407,6 +452,20 @@ async def aoitalk_agent_task_start(
     Reuse the same idempotency_key after an uncertain response. A different key
     is a new submission. Poll aoitalk_agent_task_status for progress and for
     confirmation that a cancellation has stopped the task.
+    required_outputs optionally lists up to 20 workspace-relative paths the
+    task must produce; omitted or empty sends nothing. AoiTalk must support
+    the field before it is used. edit_targets optionally lists up to 20
+    workspace-relative FILES the task may write: omitted keeps AoiTalk's
+    inference, an explicit empty list means no file writes, and a non-empty
+    list is the caller's request that AoiTalk still narrows by grants and
+    protected paths. It never widens authority; AoiTalk validates the paths.
+    requires_command_verification optionally states the caller's structured
+    intent: omitted/None sends nothing and AoiTalk infers it from the goal and
+    completion criteria; an explicit true or false is forwarded exactly and
+    overrides that inference. true means a successful command run must follow
+    the last file edit, so true with allow_commands=false is contradictory and
+    AoiTalk rejects it (422). false declares a genuinely static/file-based
+    verification task; it is not a claim that tests were run.
     """
     key = ""
     state: dict[str, Any] = {}
@@ -432,6 +491,11 @@ async def aoitalk_agent_task_start(
                                            max_length=64, pattern=CAPABILITY_RE)
         if len(set(required_capabilities)) != len(required_capabilities):
             raise AgentTaskError("invalid_input")
+        required_outputs = _required_outputs(required_outputs)
+        if requires_command_verification is not None and not isinstance(requires_command_verification, bool):
+            raise AgentTaskError("invalid_input")
+        if edit_targets is not None:
+            edit_targets = _required_outputs(edit_targets, "edit_targets")
         body: dict[str, Any] = {
             "goal": goal, "workspace": workspace, "constraints": constraints,
             "completion_criteria": completion_criteria, "mode": mode,
@@ -453,6 +517,14 @@ async def aoitalk_agent_task_start(
                 body[name] = value
         if required_capabilities_supplied:
             body["required_capabilities"] = required_capabilities
+        if required_outputs:
+            body["required_outputs"] = required_outputs
+        if edit_targets is not None:
+            # An explicit [] is meaningful (no file writes) and must be sent.
+            body["edit_targets"] = edit_targets
+        if requires_command_verification is not None:
+            # An explicit false is meaningful (static task) and must be sent.
+            body["requires_command_verification"] = requires_command_verification
 
         async def submit(client: AgentTaskClient) -> dict[str, Any]:
             nonlocal key_echo_safe, post_attempted

@@ -37,6 +37,9 @@ class BusinessReply(TypedDict, total=False):
     error: str
     message: str
     http_status: int
+    error_source: str
+    server_error_code: str
+    server_detail: str
     output_truncated: bool
     next_step: str
 

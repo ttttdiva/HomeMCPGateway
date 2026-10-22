@@ -89,7 +89,7 @@ unit testの範囲であり、複数monitor上の新guard実機検証は未実�
 全ての利用中セッションと他作業が終了した後、利用者が反映する場合の手順:
 
 ```powershell
-Set-Location D:\Dev\80_HomeMCPGateway
+Set-Location C:\path\to\HomeMCPGateway
 .\tunnel-client-v0.0.14-windows-amd64\tunnel-client.exe runtimes stop home-mcp
 .\scripts\connect_tunnel.ps1
 ```

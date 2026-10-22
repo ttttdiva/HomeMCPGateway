@@ -269,6 +269,36 @@ class AgentTaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("raw-provider-exception", json.dumps(result, ensure_ascii=False))
         self.assert_private(result)
 
+    async def test_403_keeps_server_code_and_safe_detail_without_secrets(self):
+        self.api.error_response = (
+            403,
+            {"error": "permission_denied",
+             "detail": f"Current Agent authority does not permit command_execute token=abc123 {PASSWORD}"},
+        )
+        result = await self.start(idempotency_key="denied-detail")
+        self.assertEqual(result["error"], "permission_denied")
+        self.assertEqual(result["http_status"], 403)
+        self.assertEqual(result["error_source"], "server_error_code")
+        self.assertEqual(result["server_error_code"], "permission_denied")
+        self.assertIn("command_execute", result["server_detail"])
+        encoded = json.dumps(result, ensure_ascii=False)
+        self.assertNotIn("abc123", encoded)
+        self.assertNotIn(PASSWORD, encoded)
+
+    async def test_403_without_server_code_is_marked_status_only(self):
+        self.api.error_response = (403, {"detail": "An ordinary human session is required"})
+        result = await self.start(idempotency_key="denied-status-only")
+        self.assertEqual(result["error"], "permission_denied")
+        self.assertEqual(result["error_source"], "http_status_only")
+        self.assertNotIn("server_error_code", result)
+        self.assertEqual(result["server_detail"], "An ordinary human session is required")
+
+    async def test_unlisted_403_server_code_is_reported_not_swallowed(self):
+        self.api.error_response = (403, {"error": "future_code_x", "detail": "x"})
+        result = await self.start(idempotency_key="denied-unlisted")
+        self.assertEqual(result["error"], "permission_denied")
+        self.assertEqual(result["server_error_code"], "future_code_x")
+
     async def test_agent_work_unavailable_error_keeps_safe_code_and_guidance(self):
         self.api.error_response = (
             503,
@@ -834,6 +864,262 @@ class AgentTaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(denied["ok"])
         self.assertEqual(denied["error"], "invalid_input")
         self.assertFalse(self.api.calls)
+
+
+    def posts(self):
+        return [call for call in self.api.calls if call["method"] == "POST" and call["path"].startswith("/api/")
+                and call["path"] != "/api/auth/login"]
+
+    async def test_required_outputs_omitted_or_empty_keep_existing_payload(self):
+        for index, extra in enumerate(({}, {"required_outputs": None}, {"required_outputs": []})):
+            with self.subTest(extra=extra):
+                self.api.calls.clear()
+                result = await self.start(idempotency_key=f"ro-empty-{index}", **extra)
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(self.posts()[0]["body"], {
+                    "goal": "inspect the workspace", "workspace": WORKSPACE, "constraints": [],
+                    "completion_criteria": [], "mode": "read_only", "allow_commands": False,
+                    "agent_id": str(UUID(AGENT_ID)),
+                })
+
+    async def test_required_outputs_exact_canonical_payload_and_pinned_route(self):
+        outputs = ["docs/report.md", "out\\result.json"]
+        result = await self.start(idempotency_key="ro-valid", required_outputs=outputs,
+                                  required_capabilities=["workspace_read"])
+        self.assertTrue(result["ok"], result)
+        self.assertEqual([c["path"] for c in self.api.calls], ["/api/auth/login", "/api/agent-tasks"])
+        post = self.api.calls[1]
+        self.assertEqual(post["headers"]["idempotency-key"], "ro-valid")
+        self.assertEqual(post["body"], {
+            "goal": "inspect the workspace", "workspace": WORKSPACE, "constraints": [],
+            "completion_criteria": [], "mode": "read_only", "allow_commands": False,
+            "agent_id": str(UUID(AGENT_ID)), "required_capabilities": ["workspace_read"],
+            "required_outputs": outputs,
+        })
+        # Same key + same contract replays; a changed contract conflicts.
+        replay = await self.start(idempotency_key="ro-valid", required_outputs=outputs,
+                                  required_capabilities=["workspace_read"])
+        self.assertFalse(replay["created"])
+        changed = await self.start(idempotency_key="ro-valid", required_outputs=["other.md"],
+                                   required_capabilities=["workspace_read"])
+        self.assertEqual(changed["error"], "idempotency_conflict")
+
+    async def test_required_outputs_limits_and_type_validation_make_no_http_calls(self):
+        too_many = [f"f{i}.txt" for i in range(21)]
+        self.assertTrue((await self.start(idempotency_key="ro-max20",
+                                          required_outputs=too_many[:20]))["ok"])
+        self.api.calls.clear()
+        for value in (too_many, "report.md", {"a": "b"}, [1], [None], [["a"]], [""], ["  "],
+                      ["a.txt", "a.txt"], ["/abs.txt"], ["\\abs.txt"], ["C:\\abs.txt"], ["C:abs.txt"],
+                      ["../up.txt"], ["a/../../up.txt"], ["a\\..\\up.txt"], ["a//b.txt"], ["./a.txt"],
+                      [" a.txt"], ["a\x00b"], ["a\nb"], ["x" * 513]):
+            with self.subTest(value=value):
+                self.assertEqual((await self.start(required_outputs=value))["error"], "invalid_input")
+        self.assertFalse(self.api.calls)
+
+    def test_required_outputs_schema_is_optional_list_max20(self):
+        for fn in (tasks.aoitalk_agent_task_start, legacy_tasks.aoitalk_local_task_start):
+            parameter = inspect.signature(fn, eval_str=True).parameters["required_outputs"]
+            self.assertIsNone(parameter.default)
+            schema = TypeAdapter(parameter.annotation)
+            schema.validate_python(None)
+            schema.validate_python([])
+            schema.validate_python(["a"] * 20)
+            for bad in (["a"] * 21, "a", [""], ["x" * 513], [1]):
+                with self.subTest(fn=fn.__name__, bad=bad), self.assertRaises(ValidationError):
+                    schema.validate_python(bad)
+
+    async def test_facade_forwards_required_outputs_only_to_canonical_route(self):
+        started = await legacy_tasks.aoitalk_local_task_start(
+            "facade goal", WORKSPACE, agent_id=AGENT_ID, idempotency_key="ro-facade",
+            required_outputs=["docs/report.md"])
+        self.assertTrue(started["ok"], started)
+        self.assertEqual(started["executor"], "aoitalk_agent_task")
+        self.assertEqual([c["path"] for c in self.posts()], ["/api/agent-tasks"])
+        post = self.posts()[0]
+        self.assertEqual(post["headers"]["idempotency-key"], "ro-facade")
+        self.assertEqual(post["body"]["agent_id"], str(UUID(AGENT_ID)))
+        self.assertEqual(post["body"]["required_outputs"], ["docs/report.md"])
+        self.api.calls.clear()
+        plain = await legacy_tasks.aoitalk_local_task_start(
+            "facade goal", WORKSPACE, agent_id=AGENT_ID, idempotency_key="ro-facade-plain",
+            required_outputs=[])
+        self.assertTrue(plain["ok"], plain)
+        self.assertNotIn("required_outputs", self.posts()[0]["body"])
+        self.api.calls.clear()
+        bad = await legacy_tasks.aoitalk_local_task_start(
+            "facade goal", WORKSPACE, agent_id=AGENT_ID, idempotency_key="ro-facade-bad",
+            required_outputs=["../x"])
+        self.assertEqual(bad["error"], "invalid_input")
+        self.assertFalse(self.api.calls)
+
+    async def test_facade_rejects_required_outputs_on_legacy_route_without_http(self):
+        for kwargs in ({}, {"agent_id": AGENT_ID, "provider": "openai_compatible_local"}):
+            for outputs in (["docs/report.md"], "report.md"):
+                with self.subTest(kwargs=list(kwargs), outputs=outputs):
+                    self.api.calls.clear()
+                    result = await legacy_tasks.aoitalk_local_task_start(
+                        "legacy goal", WORKSPACE, idempotency_key="ro-legacy",
+                        required_outputs=outputs, **kwargs)
+                    self.assertFalse(result["ok"])
+                    self.assertEqual(result["error"], "invalid_input")
+                    self.assertIn("required_outputs", result["detail"])
+                    self.assertFalse(self.api.calls)
+        # Omitted/empty keeps the legacy call byte-identical.
+        for outputs in (None, []):
+            self.api.calls.clear()
+            ok = await legacy_tasks.aoitalk_local_task_start(
+                "legacy goal", WORKSPACE, idempotency_key="ro-legacy-ok", required_outputs=outputs)
+            self.assertTrue(ok["ok"], ok)
+            body = self.posts()[0]["body"]
+            self.assertEqual(self.posts()[0]["path"], "/api/local-agent/tasks")
+            self.assertNotIn("required_outputs", body)
+
+    async def test_edit_targets_omitted_is_absent_empty_is_preserved_nonempty_forwarded(self):
+        base = {"goal": "inspect the workspace", "workspace": WORKSPACE, "constraints": [],
+                "completion_criteria": [], "mode": "read_only", "allow_commands": False,
+                "agent_id": str(UUID(AGENT_ID))}
+        for index, (extra, expected) in enumerate((
+            ({}, {}),
+            ({"edit_targets": None}, {}),
+            ({"edit_targets": []}, {"edit_targets": []}),
+            ({"edit_targets": ["src/app.py", "docs/a.md"]}, {"edit_targets": ["src/app.py", "docs/a.md"]}),
+            ({"edit_targets": [], "required_outputs": []}, {"edit_targets": []}),
+        )):
+            with self.subTest(extra=extra):
+                self.api.calls.clear()
+                result = await self.start(idempotency_key=f"et-{index}", **extra)
+                self.assertTrue(result["ok"], result)
+                self.assertEqual([c["path"] for c in self.api.calls], ["/api/auth/login", "/api/agent-tasks"])
+                self.assertEqual(self.posts()[0]["body"], {**base, **expected})
+                self.assertEqual(self.posts()[0]["headers"]["idempotency-key"], f"et-{index}")
+
+    async def test_edit_targets_validation_makes_no_http_calls(self):
+        bs = chr(92)
+        self.assertTrue((await self.start(idempotency_key="et-max20",
+                                          edit_targets=[f"f{i}.py" for i in range(20)]))["ok"])
+        self.api.calls.clear()
+        for value in ([f"f{i}.py" for i in range(21)], "a.py", {"a": "b"}, [1], [None], [""], ["  "],
+                      ["a.py", "a.py"], ["/abs.py"], [bs + "abs.py"], ["C:" + bs + "abs.py"],
+                      ["../up.py"], ["a/../up.py"], ["a//b.py"], ["dir/"], ["./a.py"], [" a.py"],
+                      ["a" + chr(0) + "b"], ["a" + chr(10) + "b"], ["x" * 513]):
+            with self.subTest(value=value):
+                self.assertEqual((await self.start(edit_targets=value))["error"], "invalid_input")
+        self.assertFalse(self.api.calls)
+
+    def test_edit_targets_schema_is_optional_list_max20(self):
+        for fn in (tasks.aoitalk_agent_task_start, legacy_tasks.aoitalk_local_task_start):
+            parameter = inspect.signature(fn, eval_str=True).parameters["edit_targets"]
+            self.assertIsNone(parameter.default)
+            schema = TypeAdapter(parameter.annotation)
+            for good in (None, [], ["a"] * 20):
+                self.assertEqual(schema.validate_python(good), good)
+            for bad in (["a"] * 21, "a", [""], ["x" * 513], [1]):
+                with self.subTest(fn=fn.__name__, bad=bad), self.assertRaises(ValidationError):
+                    schema.validate_python(bad)
+
+    async def test_facade_edit_targets_canonical_forward_and_legacy_reject(self):
+        started = await legacy_tasks.aoitalk_local_task_start(
+            "facade goal", WORKSPACE, agent_id=AGENT_ID, idempotency_key="et-facade", edit_targets=[])
+        self.assertTrue(started["ok"], started)
+        self.assertEqual([c["path"] for c in self.posts()], ["/api/agent-tasks"])
+        self.assertEqual(self.posts()[0]["body"]["edit_targets"], [])
+        self.api.calls.clear()
+        started = await legacy_tasks.aoitalk_local_task_start(
+            "facade goal", WORKSPACE, agent_id=AGENT_ID, idempotency_key="et-facade-2",
+            edit_targets=["src/app.py"])
+        self.assertEqual(self.posts()[0]["body"]["edit_targets"], ["src/app.py"])
+        self.api.calls.clear()
+        omitted = await legacy_tasks.aoitalk_local_task_start(
+            "facade goal", WORKSPACE, agent_id=AGENT_ID, idempotency_key="et-facade-3")
+        self.assertTrue(omitted["ok"], omitted)
+        self.assertNotIn("edit_targets", self.posts()[0]["body"])
+        self.api.calls.clear()
+        bad = await legacy_tasks.aoitalk_local_task_start(
+            "facade goal", WORKSPACE, agent_id=AGENT_ID, idempotency_key="et-facade-4",
+            edit_targets=["../x"])
+        self.assertEqual(bad["error"], "invalid_input")
+        self.assertFalse(self.api.calls)
+        for kwargs in ({}, {"agent_id": AGENT_ID, "provider": "openai_compatible_local"}):
+            for value in ([], ["src/app.py"]):
+                with self.subTest(kwargs=list(kwargs), value=value):
+                    result = await legacy_tasks.aoitalk_local_task_start(
+                        "legacy goal", WORKSPACE, idempotency_key="et-legacy", edit_targets=value, **kwargs)
+                    self.assertFalse(result["ok"])
+                    self.assertEqual(result["error"], "invalid_input")
+                    self.assertIn("edit_targets", result["detail"])
+                    self.assertFalse(self.api.calls)
+        ok = await legacy_tasks.aoitalk_local_task_start(
+            "legacy goal", WORKSPACE, idempotency_key="et-legacy-ok", edit_targets=None)
+        self.assertTrue(ok["ok"], ok)
+        self.assertEqual(self.posts()[0]["path"], "/api/local-agent/tasks")
+        self.assertNotIn("edit_targets", self.posts()[0]["body"])
+
+
+    async def test_requires_command_verification_omitted_absent_explicit_forwarded_exactly(self):
+        for index, (extra, present, value) in enumerate((
+            ({}, False, None),
+            ({"requires_command_verification": None}, False, None),
+            ({"requires_command_verification": False}, True, False),
+            ({"requires_command_verification": True, "mode": "mutate", "allow_commands": True}, True, True),
+        )):
+            with self.subTest(extra=extra):
+                self.api.calls.clear()
+                result = await self.start(idempotency_key=f"rcv-{index}", **extra)
+                self.assertTrue(result["ok"], result)
+                body = self.posts()[0]["body"]
+                self.assertEqual("requires_command_verification" in body, present)
+                if present:
+                    self.assertIs(body["requires_command_verification"], value)
+
+    async def test_requires_command_verification_nonboolean_makes_no_http_calls(self):
+        for value in (0, 1, "true", "false", [], {}, 1.0):
+            with self.subTest(value=value):
+                self.api.calls.clear()
+                self.assertEqual(
+                    (await self.start(requires_command_verification=value))["error"], "invalid_input")
+                self.assertFalse(self.api.calls)
+
+    def test_requires_command_verification_schema_is_strict_optional_bool(self):
+        for fn in (tasks.aoitalk_agent_task_start, legacy_tasks.aoitalk_local_task_start):
+            parameter = inspect.signature(fn, eval_str=True).parameters["requires_command_verification"]
+            self.assertIsNone(parameter.default)
+            schema = TypeAdapter(parameter.annotation)
+            for good in (None, True, False):
+                self.assertIs(schema.validate_python(good), good)
+            for bad in (0, 1, "true", "false", []):
+                with self.subTest(fn=fn.__name__, bad=bad), self.assertRaises(ValidationError):
+                    schema.validate_python(bad)
+
+    async def test_facade_requires_command_verification_canonical_forward_and_legacy_reject(self):
+        for index, value in enumerate((False, True)):
+            self.api.calls.clear()
+            started = await legacy_tasks.aoitalk_local_task_start(
+                "facade goal", WORKSPACE, agent_id=AGENT_ID, idempotency_key=f"rcv-facade-{index}",
+                requires_command_verification=value)
+            self.assertTrue(started["ok"], started)
+            self.assertIs(self.posts()[0]["body"]["requires_command_verification"], value)
+        self.api.calls.clear()
+        omitted = await legacy_tasks.aoitalk_local_task_start(
+            "facade goal", WORKSPACE, agent_id=AGENT_ID, idempotency_key="rcv-facade-omit")
+        self.assertTrue(omitted["ok"], omitted)
+        self.assertNotIn("requires_command_verification", self.posts()[0]["body"])
+        self.api.calls.clear()
+        bad = await legacy_tasks.aoitalk_local_task_start(
+            "facade goal", WORKSPACE, agent_id=AGENT_ID, idempotency_key="rcv-facade-bad",
+            requires_command_verification="true")
+        self.assertEqual(bad["error"], "invalid_input")
+        self.assertFalse(self.api.calls)
+        for kwargs in ({}, {"agent_id": AGENT_ID, "provider": "openai_compatible_local"}):
+            for value in (False, True):
+                with self.subTest(kwargs=list(kwargs), value=value):
+                    result = await legacy_tasks.aoitalk_local_task_start(
+                        "legacy goal", WORKSPACE, idempotency_key="rcv-legacy",
+                        requires_command_verification=value, **kwargs)
+                    self.assertFalse(result["ok"])
+                    self.assertEqual(result["error"], "invalid_input")
+                    self.assertIn("requires_command_verification", result["detail"])
+                    self.assertFalse(self.api.calls)
 
 
 if __name__ == "__main__":

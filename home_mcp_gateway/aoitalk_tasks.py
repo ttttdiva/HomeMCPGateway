@@ -21,7 +21,7 @@ import uuid
 from typing import Annotated, Any, Literal
 
 import httpx
-from pydantic import Field
+from pydantic import Field, StrictBool
 
 from . import aoitalk
 
@@ -416,6 +416,11 @@ async def aoitalk_local_task_start(
     provider: Literal["openai_compatible_local", "ollama", "codex-cli"] | None = None,
     model: Annotated[str | None, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")] = None,
     effort: Annotated[str | None, Field(pattern=r"^[a-z][a-z0-9_]{0,39}$")] = None,
+    required_outputs: Annotated[list[Annotated[str, Field(min_length=1, max_length=512)]] | None,
+                                Field(max_length=20)] = None,
+    edit_targets: Annotated[list[Annotated[str, Field(min_length=1, max_length=512)]] | None,
+                            Field(max_length=20)] = None,
+    requires_command_verification: StrictBool | None = None,
 ) -> dict[str, Any]:
     """Delegate a multi-step workspace goal to AoiTalk's LLM agent; returns task_id at once.
 
@@ -441,6 +446,18 @@ async def aoitalk_local_task_start(
     allow_commands=false: host commands are not an OS sandbox. Omission is
     passed through so canonical execution defaults to false while an explicitly
     selected legacy execution path retains its existing server-side default.
+    required_outputs (up to 20 workspace-relative paths) is supported only on
+    the canonical agent_id route; a non-empty value with a legacy request is
+    rejected rather than dropped. Omitted or empty changes nothing.
+    edit_targets (up to 20 workspace-relative files) is likewise canonical-only,
+    but on a legacy request any supplied value, including [], is rejected.
+    On the canonical route None is omitted and [] is forwarded (no file writes).
+    requires_command_verification (true/false) is canonical-only too: any
+    non-null value on a legacy request is rejected. On the canonical route None
+    is omitted and an explicit true/false is forwarded exactly; it overrides
+    AoiTalk's wording-based inference. true with allow_commands=false is
+    contradictory (rejected by AoiTalk); false marks a static/file-verification
+    task and is not a claim that tests ran.
     """
     key = idempotency_key if idempotency_key is not None else f"gw-{uuid.uuid4().hex}"
     state: dict[str, Any] = {"idempotency_key": key}
@@ -470,7 +487,38 @@ async def aoitalk_local_task_start(
             if value is not None:
                 body[name] = _optional_text(value, name)
 
-        if agent_id is not None and provider is None:
+        canonical = agent_id is not None and provider is None
+        if required_outputs not in (None, []) and not canonical:
+            raise TaskError(
+                "invalid_input",
+                detail=(
+                    "required_outputs is supported only on the canonical Agent API "
+                    "(agent_id supplied, provider omitted); legacy local-task requests cannot enforce it"
+                ),
+            )
+
+        if edit_targets is not None and not canonical:
+            raise TaskError(
+                "invalid_input",
+                detail=(
+                    "edit_targets is supported only on the canonical Agent API "
+                    "(agent_id supplied, provider omitted); legacy local-task requests cannot enforce it"
+                ),
+            )
+
+        if requires_command_verification is not None:
+            if not isinstance(requires_command_verification, bool):
+                raise TaskError("invalid_input", detail="requires_command_verification must be boolean or null")
+            if not canonical:
+                raise TaskError(
+                    "invalid_input",
+                    detail=(
+                        "requires_command_verification is supported only on the canonical Agent API "
+                        "(agent_id supplied, provider omitted); legacy local-task requests cannot enforce it"
+                    ),
+                )
+
+        if canonical:
             legacy_only_options = (
                 allow_adb,
                 allow_git_commit,
@@ -503,6 +551,9 @@ async def aoitalk_local_task_start(
                 provider=None,
                 model=model,
                 effort=effort,
+                required_outputs=required_outputs,
+                edit_targets=edit_targets,
+                requires_command_verification=requires_command_verification,
             )
             if not routed.get("ok"):
                 return routed

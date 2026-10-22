@@ -23,7 +23,8 @@ import httpx
 from mcp.client import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
-from home_mcp_gateway import aoitalk, aoitalk_agent_tasks
+from home_mcp_gateway import aoitalk
+from home_mcp_gateway import aoitalk_agent_tasks as agent_tasks
 from home_mcp_gateway import aoitalk_cli_sessions as cli
 
 
@@ -31,7 +32,7 @@ USER = "fixture-user"
 PASSWORD = "fixture-password-${LITERAL}-#-秘密"
 SETTINGS = aoitalk.Settings("http://127.0.0.1:3000", USER, PASSWORD)
 AGENT_ID = "11111111-1111-1111-1111-111111111111"
-WORKSPACE = r"D:\Dev\80_HomeMCPGateway"
+WORKSPACE = r"C:\path\to\HomeMCPGateway"
 SESSION_ID = "11111111-1111-4111-8111-111111111111"
 HTTPX_ASYNC_CLIENT = httpx.AsyncClient
 
@@ -297,8 +298,8 @@ class CliSessionTests(unittest.IsolatedAsyncioTestCase):
         from fastapi.responses import JSONResponse
 
         owner_id = "11111111-1111-4111-8111-111111111111"
-        agent_revision_id = "00000000-0000-4000-8000-000000000002"
-        binding_id = "00000000-0000-4000-8000-000000000003"
+        agent_revision_id = "22222222-2222-4222-8222-222222222222"
+        binding_id = "33333333-3333-4333-8333-333333333333"
         session_uuid = uuid.UUID(SESSION_ID)
         work_uuid = uuid.uuid4()
         run_uuid = uuid.uuid4()
@@ -798,9 +799,14 @@ class StdioCliSessionTests(unittest.TestCase):
                     async with ClientSession(read, write) as session:
                         await session.initialize()
                         listing = {tool.name: tool for tool in (await session.list_tools()).tools}
-                        expected = {fn.__name__ for fn in (*cli.TOOLS, *aoitalk_agent_tasks.TOOLS)}
+                        expected = {fn.__name__ for fn in cli.TOOLS}
                         self.assertTrue(expected <= set(listing))
-                        self.assertEqual(len(listing), 96)
+                        # 92 pre-existing tools plus the four generic Agent task tools.
+                        agent_task_tools = {"aoitalk_agent_task_start", "aoitalk_agent_task_status",
+                                            "aoitalk_agent_task_tail", "aoitalk_agent_task_cancel"}
+                        self.assertEqual(agent_task_tools, {fn.__name__ for fn in agent_tasks.TOOLS})
+                        self.assertTrue(agent_task_tools <= set(listing))
+                        self.assertEqual(len(listing), 92 + len(agent_task_tools))
                         for name in expected:
                             self.assertEqual(listing[name].output_schema["type"], "object")
                             self.assertIn("ok", listing[name].output_schema["required"])
