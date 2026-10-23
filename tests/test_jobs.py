@@ -1,5 +1,7 @@
 import json
 import asyncio
+import concurrent.futures
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -154,3 +156,81 @@ class JobTests(unittest.TestCase):
                 jobs._read(Path('metadata.json'))
         self.assertEqual(read.call_count, 20)
         self.assertEqual(sleep.call_count, 19)
+
+    def test_keyed_start_replays_same_reservation_and_conflicts_on_payload_change(self):
+        command = [sys.executable, "-u", "-c", "print('only-once')"]
+        key = "wd2:codex_start:" + "a" * 64
+        fingerprint = hashlib.sha256(b"pinned request").hexdigest()
+        with patch.dict(os.environ, {"D80_AMBIENT_IDENTITY_TEST": "parent-one"}, clear=False):
+            first = jobs.job_start(command, cwd=self.runtime, env={"QA_EXPLICIT": "one"}, runtime_dir=self.runtime,
+                                   idempotency_key=key, request_fingerprint=fingerprint)
+        self.ids.append(first["job_id"])
+        with patch.dict(os.environ, {"D80_AMBIENT_IDENTITY_TEST": "parent-two"}, clear=False):
+            second = jobs.job_start(command, cwd=self.runtime, env={"QA_EXPLICIT": "one"}, runtime_dir=self.runtime,
+                                    idempotency_key=key, request_fingerprint=fingerprint)
+        self.assertEqual(second["job_id"], first["job_id"])
+        self.assertNotIn("idempotency_conflict", second)
+        conflict = jobs.job_start(command, cwd=self.runtime, env={"QA_EXPLICIT": "two"}, runtime_dir=self.runtime,
+                                  idempotency_key=key, request_fingerprint=fingerprint)
+        self.assertEqual(conflict["error"], "idempotency_conflict")
+        changed_command = jobs.job_start([*command[:-1], "print('changed')"], cwd=self.runtime, env={"QA_EXPLICIT": "one"},
+                                         runtime_dir=self.runtime, idempotency_key=key, request_fingerprint=fingerprint)
+        changed_cwd = jobs.job_start(command, cwd=str(Path(self.runtime) / "other"), env={"QA_EXPLICIT": "one"},
+                                     runtime_dir=self.runtime, idempotency_key=key, request_fingerprint=fingerprint)
+        changed_request = jobs.job_start(command, cwd=self.runtime, env={"QA_EXPLICIT": "one"}, runtime_dir=self.runtime,
+                                         idempotency_key=key, request_fingerprint=hashlib.sha256(b"changed request").hexdigest())
+        self.assertEqual(changed_command["error"], "idempotency_conflict")
+        self.assertEqual(changed_cwd["error"], "idempotency_conflict")
+        self.assertEqual(changed_request["error"], "idempotency_conflict")
+        metadata = jobs._read(jobs._directory(first["job_id"], self.runtime) / "metadata.json")
+        self.assertEqual(metadata["explicit_env_digest"], jobs._explicit_env_digest({"QA_EXPLICIT": "one"}))
+        result = jobs.job_wait(first["job_id"], 10, self.runtime)
+        self.assertEqual(result["status"], "exited")
+        self.assertEqual(jobs.job_tail(first["job_id"], max_bytes=0, runtime_dir=self.runtime)["stdout"].count("only-once"), 1)
+
+    def test_keyed_concurrent_start_has_one_worker_and_one_process_effect(self):
+        command = [sys.executable, "-u", "-c", "import time; print('one-effect',flush=True); time.sleep(.2)"]
+        key = "wd2:concurrent:" + "b" * 64
+        fingerprint = hashlib.sha256(b"immutable").hexdigest()
+        def start():
+            return jobs.job_start(command, cwd=self.runtime, runtime_dir=self.runtime, idempotency_key=key,
+                                  request_fingerprint=fingerprint)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            first, second = list(pool.map(lambda _: start(), range(2)))
+        self.assertEqual(first["job_id"], second["job_id"])
+        self.ids.append(first["job_id"])
+        result = jobs.job_wait(first["job_id"], 10, self.runtime)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(jobs.job_tail(first["job_id"], max_bytes=0, runtime_dir=self.runtime)["stdout"].count("one-effect"), 1)
+
+    def test_keyed_empty_reservation_stays_unknown_without_launch(self):
+        key = "wd2:empty:" + "c" * 64
+        job_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "home-mcp-gateway-job:" + key))
+        jobs._directory(job_id, self.runtime).mkdir(parents=True)
+        result = jobs.job_start([sys.executable, "-c", "print('must-not-run')"], cwd=self.runtime,
+                                runtime_dir=self.runtime, idempotency_key=key,
+                                request_fingerprint=hashlib.sha256(b"pinned").hexdigest())
+        self.assertEqual(result["job_id"], job_id)
+        self.assertEqual(result["status"], "unknown")
+        self.assertFalse((jobs._directory(job_id, self.runtime) / "metadata.json").exists())
+
+    def test_duplicate_keyed_worker_bootstrap_cannot_take_over_metadata(self):
+        from home_mcp_gateway.job_worker import main
+        job_id = str(uuid.uuid4())
+        directory = jobs._directory(job_id, self.runtime)
+        directory.mkdir(parents=True)
+        metadata = {"job_id": job_id, "idempotency_key": "wd2:fence:" + "d" * 64,
+                    "request_fingerprint": hashlib.sha256(b"fp").hexdigest(), "dispatcher_request_fingerprint": None,
+                    "dispatcher_binding": None, "launch_fence_state": "pending", "command": [sys.executable, "-c", "print('fenced')"],
+                    "cwd": self.runtime, "started_at": time.time(), "finished_at": None, "status": "starting", "exit_code": None,
+                    "pid": None, "process_create_time": None, "worker_pid": None, "worker_create_time": None,
+                    "stdout_path": str(directory / "stdout.log"), "stderr_path": str(directory / "stderr.log"),
+                    "runtime_dir": self.runtime}
+        jobs._save(directory / "metadata.json", metadata)
+        main(directory)
+        first = jobs._read(directory / "metadata.json")
+        main(directory)
+        second = jobs._read(directory / "metadata.json")
+        self.assertEqual(first["status"], "exited")
+        self.assertEqual(second["worker_pid"], first["worker_pid"])
+        self.assertEqual((directory / "stdout.log").read_text().count("fenced"), 1)

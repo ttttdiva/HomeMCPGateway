@@ -10,6 +10,7 @@ import threading
 import time
 from typing import Any
 import uuid
+import hashlib
 
 import psutil
 
@@ -45,6 +46,13 @@ def _directory(job_id: str, runtime_dir: str | None = None) -> Path:
     return runtime_root(runtime_dir) / "jobs" / str(uuid.UUID(job_id))
 
 
+def stable_job_id(idempotency_key: str) -> str:
+    """Pure shared UUID codec for one keyed reservation; callers must keep the exact key stable."""
+    if not isinstance(idempotency_key, str) or not idempotency_key:
+        raise ValueError("invalid_idempotency_key")
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, "home-mcp-gateway-job:" + idempotency_key)).lower()
+
+
 def _save(path: Path, data: dict) -> None:
     temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
@@ -76,6 +84,55 @@ def _read(path: Path) -> dict:
                 raise
             time.sleep(.025)
     raise AssertionError("unreachable metadata read state")
+
+
+def _explicit_env_digest(env: dict[str, str] | None) -> str:
+    """Hash only caller-supplied environment overrides, never inherited ambient variables."""
+    return hashlib.sha256(json.dumps(env or {}, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _keyed_fingerprint_from_env_digest(command: str | list[str], cwd: str, explicit_env_digest: str,
+                                       request_fingerprint: str | None,
+                                       dispatcher_binding: dict[str, Any] | None) -> str:
+    """Rebuild keyed identity from immutable request fields without consulting process environment."""
+    if isinstance(command, str):
+        normalized_command: Any = {"shell": command}
+    else:
+        normalized_command = {"argv": command}
+    payload = {"command": normalized_command, "cwd": cwd, "env_sha256": explicit_env_digest,
+               "request_fingerprint": request_fingerprint, "dispatcher_binding": dispatcher_binding}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _keyed_fingerprint(command: str | list[str], cwd: str, env: dict[str, str] | None,
+                       request_fingerprint: str | None, dispatcher_binding: dict[str, Any] | None) -> str:
+    """Hash the explicit immutable keyed launch request without exposing env values."""
+    return _keyed_fingerprint_from_env_digest(command, cwd, _explicit_env_digest(env), request_fingerprint, dispatcher_binding)
+
+
+def _dispatcher_binding_valid(binding: Any) -> bool:
+    """Accept only the narrow v2 dispatcher-to-job guard record."""
+    if not isinstance(binding, dict) or set(binding) != {
+            "db_path", "manifest_id", "manifest_digest", "root_source_id", "root_epoch", "generation",
+            "job_id", "op_key", "request_digest", "gateway_job_id", "request_fingerprint"}:
+        return False
+    if not all(isinstance(binding.get(key), str) and binding[key] for key in
+               ("db_path", "manifest_id", "root_source_id", "job_id", "op_key")):
+        return False
+    if any(not isinstance(binding.get(key), str) or len(binding[key]) != 64 or
+           any(c not in "0123456789abcdef" for c in binding[key]) for key in
+           ("manifest_digest", "request_digest", "request_fingerprint")):
+        return False
+    if type(binding.get("root_epoch")) is not int or binding["root_epoch"] < 0:
+        return False
+    if type(binding.get("generation")) is not int or binding["generation"] < 1:
+        return False
+    try:
+        if str(uuid.UUID(binding.get("gateway_job_id", ""))) != binding["gateway_job_id"].lower():
+            return False
+    except (ValueError, AttributeError):
+        return False
+    return True
 
 
 def identity(pid: int | None, create_time: float | None) -> str:
@@ -167,26 +224,67 @@ def _last_output(result: dict[str, Any], max_bytes: int = 4000) -> str:
 
 
 def job_start(command: str | list[str], cwd: str | None = None, env: dict[str, str] | None = None,
-              runtime_dir: str | None = None) -> dict[str, Any]:
+              runtime_dir: str | None = None, *, idempotency_key: str | None = None,
+              request_fingerprint: str | None = None,
+              dispatcher_binding: dict[str, Any] | None = None) -> dict[str, Any]:
     """Start a persistent Windows workspace job. String command uses the workspace shell; argv list avoids shell quoting. Returns job ID, identity, logs and Git provenance."""
-    job_id = str(uuid.uuid4())
-    directory = _directory(job_id, runtime_dir)
-    directory.mkdir(parents=True)
+    keyed = idempotency_key is not None
+    if keyed:
+        if (not isinstance(idempotency_key, str) or not idempotency_key or len(idempotency_key) > 512
+                or (request_fingerprint is not None and (not isinstance(request_fingerprint, str) or len(request_fingerprint) != 64
+                    or any(c not in "0123456789abcdef" for c in request_fingerprint)))
+                or (dispatcher_binding is not None and not _dispatcher_binding_valid(dispatcher_binding))):
+            return {"ok": False, "error": "invalid_idempotency_binding", "status": "unknown"}
+    elif request_fingerprint is not None or dispatcher_binding is not None:
+        return {"ok": False, "error": "invalid_idempotency_binding", "status": "unknown"}
     working = str(Path(cwd or os.getcwd()).expanduser().resolve())
+    child_env = dict(os.environ)
+    child_env.update(env or {})
+    explicit_env_digest = _explicit_env_digest(env) if keyed else None
+    request_hash = (_keyed_fingerprint_from_env_digest(command, working, explicit_env_digest, request_fingerprint, dispatcher_binding)
+                    if keyed else None)
+    job_id = stable_job_id(idempotency_key) if keyed else str(uuid.uuid4())
+    directory = _directory(job_id, runtime_dir)
+    if keyed:
+        directory.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            directory.mkdir()
+        except FileExistsError:
+            metadata_path = directory / "metadata.json"
+            try:
+                state = _read(metadata_path)
+            except (FileNotFoundError, PermissionError, ValueError, OSError):
+                return {"ok": False, "job_id": job_id, "status": "unknown", "error": "reservation_unknown",
+                        "idempotency_conflict": False}
+            if (state.get("idempotency_key") != idempotency_key or state.get("request_fingerprint") != request_hash
+                    or state.get("explicit_env_digest") != explicit_env_digest
+                    or state.get("command") != command or state.get("cwd") != working
+                    or state.get("dispatcher_binding") != dispatcher_binding):
+                return {"ok": False, "job_id": job_id, "status": "unknown", "error": "idempotency_conflict",
+                        "idempotency_conflict": True}
+            try:
+                return job_status(job_id, runtime_dir)
+            except (FileNotFoundError, PermissionError, ValueError, OSError):
+                return {"ok": False, "job_id": job_id, "status": "unknown", "error": "reservation_unknown"}
+    else:
+        directory.mkdir(parents=True)
     metadata = {"job_id": job_id, "pid": None, "process_create_time": None, "command": command,
                 "cwd": working, "started_at": time.time(), "finished_at": None, "status": "starting",
                 "exit_code": None, "worker_pid": None, "worker_create_time": None,
                 "stdout_path": str(directory / "stdout.log"), "stderr_path": str(directory / "stderr.log"),
                 "worker_log_path": str(directory / "worker.log"),
                 "runtime_dir": str(runtime_root(runtime_dir))}
+    if keyed:
+        metadata.update(idempotency_key=idempotency_key, request_fingerprint=request_hash,
+                        dispatcher_request_fingerprint=request_fingerprint, dispatcher_binding=dispatcher_binding,
+                        explicit_env_digest=explicit_env_digest,
+                        launch_fence_state="pending")
     try:
         from .git_qa import git_status
         metadata["git_at_start"] = git_status(working)
     except (OSError, ValueError, subprocess.SubprocessError):
         metadata["git_at_start"] = None
     _save(directory / "metadata.json", metadata)
-    child_env = dict(os.environ)
-    child_env.update(env or {})
     worker = None
     try:
         # Run by absolute script path so recovery does not depend on cwd/PYTHONPATH.
@@ -201,7 +299,12 @@ def job_start(command: str | list[str], cwd: str | None = None, env: dict[str, s
         if worker:
             threading.Thread(target=worker.wait, daemon=True).start()
     except Exception as exc:
-        metadata.update(status="failed", error=str(exc), finished_at=time.time())
+        if keyed:
+            metadata.update(status="unknown", error_code="worker_launch_unknown",
+                            error="Keyed launch outcome is unknown; inspect the exact Gateway job metadata and worker log.",
+                            finished_at=time.time())
+        else:
+            metadata.update(status="failed", error=str(exc), finished_at=time.time())
         _save(directory / "metadata.json", metadata)
         return metadata
     deadline = time.monotonic() + 10
@@ -219,7 +322,14 @@ def job_start(command: str | list[str], cwd: str | None = None, env: dict[str, s
 
 def job_status(job_id: str, runtime_dir: str | None = None) -> dict[str, Any]:
     """Rediscover metadata, verify process identity, and report cheap progress timestamps."""
-    result = _read(_directory(job_id, runtime_dir) / "metadata.json")
+    try:
+        result = _read(_directory(job_id, runtime_dir) / "metadata.json")
+    except FileNotFoundError:
+        directory = _directory(job_id, runtime_dir)
+        if directory.exists():
+            return {"job_id": str(uuid.UUID(job_id)), "status": "unknown", "error_code": "reservation_incomplete",
+                    "process_identity": "missing", "worker_identity": "missing"}
+        raise
     result["process_identity"] = identity(result.get("pid"), result.get("process_create_time"))
     result["worker_identity"] = identity(result.get("worker_pid"), result.get("worker_create_time"))
     if (result["status"] in ACTIVE and result["process_identity"] in {"missing", "pid_reused"}
