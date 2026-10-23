@@ -9,6 +9,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import re
 import sqlite3
 import tempfile
@@ -1170,7 +1171,7 @@ class LedgerMigration(unittest.TestCase):
             directory = Path(tmp)
             self.build(directory)
             conn = ws.connect(directory)
-            backups = list(directory.glob("state.sqlite3.pre-v4-*.bak"))
+            backups = list(directory.glob("state.sqlite3.pre-v5-*.bak"))
             self.assertEqual(len(backups), 1)
             with contextlib.closing(sqlite3.connect(backups[0])) as old:       # the original observations survive untouched
                 self.assertEqual(old.execute("SELECT retired FROM sessions").fetchone()[0], 1)
@@ -1181,7 +1182,7 @@ class LedgerMigration(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT kind FROM inbox WHERE event_id='e1'").fetchone()[0], "output")       # v1 stored cli.output as info
             self.assertEqual(conn.execute("SELECT kind FROM inbox WHERE event_id='e2'").fetchone()[0], "info")         # telemetry is not output
             self.assertEqual(tuple(conn.execute("SELECT retired, cursor FROM sessions").fetchone()), (0, "c9"))
-            self.assertEqual(conn.execute("SELECT value FROM meta WHERE key='ledger_version'").fetchone()[0], "4")
+            self.assertEqual(conn.execute("SELECT value FROM meta WHERE key='ledger_version'").fetchone()[0], "5")
             self.assertEqual(conn.execute("SELECT status FROM runs WHERE run_id=?", (RUN_A,)).fetchone()[0], "unknown")
             states = {r[0]: r[1] for r in conn.execute("SELECT handoff_id, delivery_state FROM outbox")}
             self.assertEqual(states, {f"cli:{S1}": "superseded", f"task:{T1}": "received"})   # nothing superseded is revived
@@ -1189,7 +1190,7 @@ class LedgerMigration(unittest.TestCase):
             self.assertEqual(pending["total_pending"], 0)
             conn.close()
             ws.connect(directory).close()                                       # idempotent: no second backup
-            self.assertEqual(len(list(directory.glob("state.sqlite3.pre-v4-*.bak"))), 1)
+            self.assertEqual(len(list(directory.glob("state.sqlite3.pre-v5-*.bak"))), 1)
 
     def test_legacy_ack_does_not_swallow_a_new_run(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1412,3 +1413,674 @@ class LogonRecovery(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SplitBeforeShrink(Base):
+    def test_combined_clip_splits_sessions_without_shrinking_their_page(self):
+        def collect(body):
+            group = body["session_ids"]
+            if len(group) > 1:
+                return {"sessions": [], "output_truncated": True}
+            return {"sessions": [{"session_id": group[0], "events": [event(n) for n in range(body["limit_per_session"])], "next_cursor": "c100"}]}
+        client = FakeClient(sessions={S1: {"provider": "claude-cli", "status": "running"},
+                                      S2: {"provider": "claude-cli", "status": "running"}}, collect_hook=collect)
+        self.poll(client)
+        self.assertEqual(set(client.collect_limits), {100})
+        self.assertEqual(self.count("inbox", f"session_id='{S1}'"), 100)
+        self.assertEqual(self.count("inbox", f"session_id='{S2}'"), 100)
+        self.assertLess(len(client.collect_limits), 10)
+
+    def test_one_heavy_session_cannot_force_the_others_to_shrink_or_move(self):
+        def collect(body):
+            group = body["session_ids"]
+            pages = []
+            for sid in group:
+                if sid == S2:
+                    return {"sessions": [], "output_truncated": True}     # S2 is clipped even alone
+                pages.append({"session_id": sid, "events": [event(n) for n in range(body["limit_per_session"])], "next_cursor": "c100"})
+            return {"sessions": pages, "output_truncated": len(group) > 1}
+        client = FakeClient(sessions={S1: {"provider": "claude-cli", "status": "running"},
+                                      S2: {"provider": "claude-cli", "status": "running"}}, collect_hook=collect)
+        status = self.poll(client)
+        self.assertEqual(self.count("inbox", f"session_id='{S1}'"), 100)
+        self.assertEqual(self.count("inbox", f"session_id='{S2}'"), 0)
+        self.assertIsNone(self.conn.execute("SELECT cursor FROM sessions WHERE session_id=?", (S2,)).fetchone()[0])
+        self.assertIn("cursor_stalled_truncated_page", self.codes(status))
+        self.assertLessEqual(len(client.collect_limits), 12)
+
+    def test_one_blocked_session_retries_alone_and_never_sends_an_empty_batch(self):
+        def collect(body):
+            group = body["session_ids"]
+            assert group, "empty collect batch"
+            return {"sessions": [{"session_id": sid, "events": [event(1)], "next_cursor": "c1", "cursor_advance_blocked": True}
+                                 if sid == S2 else {"session_id": sid, "events": [event(n) for n in range(3)], "next_cursor": "c3"}
+                                 for sid in group]}
+        client = FakeClient(sessions={S1: {"provider": "claude-cli", "status": "running"},
+                                      S2: {"provider": "claude-cli", "status": "running"}}, collect_hook=collect)
+        status = self.poll(client)
+        self.assertEqual(self.count("inbox", f"session_id='{S1}'"), 3)      # the accepted page is kept
+        self.assertEqual(self.count("inbox", f"session_id='{S2}'"), 0)
+        self.assertIn("cursor_stalled_truncated_page", self.codes(status))
+
+
+class FollowUpBetweenPolls(Base):
+    def test_run_that_starts_and_ends_between_polls_is_collected_with_its_own_handoff(self):
+        client = FakeClient(sessions={S1: {"provider": "claude-cli", "status": "completed"}},
+                            events={S1: [chunk(RUN_A, M1, 0, 1, 0, "A body"), done(RUN_A, M1)]})
+        status = None
+        for _ in range(3):
+            status = self.poll(client)
+        self.assertEqual(handoff_ids(status), [hid()])
+        first = self.conn.execute("SELECT result_text, result_digest FROM handoffs WHERE run_id=?", (RUN_A,)).fetchone()
+        client.events[S1] += [chunk(RUN_B, M2, 0, 1, 0, "B body"), done(RUN_B, M2)]    # never observed active
+        with mock.patch.object(ws, "TERMINAL_RECHECK_SECONDS", 0.0):
+            for _ in range(3):
+                status = self.poll(client)
+        self.assertEqual(handoff_ids(status), sorted([hid(), hid(RUN_B, M2)]))
+        self.assertEqual(self.conn.execute("SELECT result_text FROM handoffs WHERE run_id=?", (RUN_B,)).fetchone()[0], "B body")
+        self.assertEqual(tuple(self.conn.execute("SELECT result_text, result_digest FROM handoffs WHERE run_id=?", (RUN_A,)).fetchone()), tuple(first))
+
+    def test_listed_change_hint_triggers_collection_immediately(self):
+        client = FakeClient(sessions={S1: {"provider": "claude-cli", "status": "completed", "updated_at": "2026-10-22T10:00:00Z"}},
+                            events={S1: [chunk(RUN_A, M1, 0, 1, 0, "A body"), done(RUN_A, M1)]})
+        for _ in range(3):
+            self.poll(client)
+        client.events[S1] += [chunk(RUN_B, M2, 0, 1, 0, "B body"), done(RUN_B, M2)]
+        client.sessions[S1]["updated_at"] = "2026-10-23T10:00:00Z"
+        status = self.poll(client)                       # default 120s recheck window: only the hint can explain this
+        self.assertIn(hid(RUN_B, M2), handoff_ids(status))
+
+    def test_quiet_terminal_sessions_are_not_rechecked_every_poll(self):
+        client = FakeClient(sessions={S1: {"provider": "claude-cli", "status": "completed"}},
+                            events={S1: [chunk(RUN_A, M1, 0, 1, 0, "A body"), done(RUN_A, M1)]})
+        for _ in range(3):
+            self.poll(client)
+        before = len(client.collect_limits)
+        self.poll(client)
+        self.assertEqual(len(client.collect_limits), before)
+
+
+class TimedMessages(FakeClient):
+    """Mirrors AoiTalk: ordered by created_at, filtered on coalesce(updated, created) > since-5s, server_time = page max."""
+
+    async def call(self, method, path, **kwargs):
+        m = re.fullmatch(r"/api/conversations/([0-9a-f-]{36})/messages", path)
+        if not m:
+            return await super().call(method, path, **kwargs)
+        self.calls.append((method, path))
+        params = kwargs["params"]
+        since = ws.parse_time(params["since"])
+        rows = sorted(self.messages[m[1]], key=lambda r: ws.parse_time(r["created_at"]))
+        rows = [r for r in rows if ws.parse_time(r.get("updated_at") or r["created_at"]) > since - 5][: params["limit"]]
+        latest = max([ws.parse_time(r.get("updated_at") or r["created_at"]) for r in rows] + [since])
+        return 200, {"success": True, "messages": rows, "server_time": ws.iso(latest)}
+
+
+class MessageCursor(MessageRecovery):
+    def client(self, rows):
+        base = self.p0()
+        return TimedMessages(sessions=base.sessions, events=base.events, runs=base.runs, messages={S1: rows})
+
+    def stamped(self, msg, run, second, **extra):
+        return {**message(msg, S1, run, "n"), "created_at": f"2026-10-22T14:00:{second:02d}", **extra}
+
+    def reason(self):
+        return self.conn.execute("SELECT recover_reason FROM runs WHERE run_id=?", (RUN_A,)).fetchone()[0]
+
+    def test_target_beyond_the_first_page_is_found_by_created_at_paging(self):
+        rows = [self.stamped(f"b{i:07d}-0000-4000-8000-000000000000", RUN_B, i * 6) for i in range(8)]
+        rows += [{**message(M1, S1, RUN_A, "late body"), "created_at": "2026-10-22T14:00:55"}]
+        with mock.patch.object(ws, "MESSAGE_LIMITS", (5,)):
+            for _ in range(4):
+                status = self.poll(self.client(rows))
+        self.assertEqual(handoff_ids(status), [hid()])
+
+    def test_updated_at_of_an_early_row_cannot_skip_unread_rows(self):
+        rows = [self.stamped(f"b{i:07d}-0000-4000-8000-000000000000", RUN_B, i * 6) for i in range(5)]
+        rows[0]["updated_at"] = "2026-10-22T15:00:00"          # would drag server_time past the target
+        rows += [{**message(M1, S1, RUN_A, "late body"), "created_at": "2026-10-22T14:00:40"}]
+        client = self.client(rows)
+        with mock.patch.object(ws, "MESSAGE_LIMITS", (5,)):
+            for _ in range(4):
+                status = self.poll(client)
+        self.assertEqual(handoff_ids(status), [hid()])
+
+    def test_equal_timestamps_beyond_a_page_stay_pending_without_skipping(self):
+        rows = [self.stamped(f"b{i:07d}-0000-4000-8000-000000000000", RUN_B, 10) for i in range(6)]
+        rows += [{**message(M1, S1, RUN_A, "late body"), "created_at": "2026-10-22T14:00:10"}]
+        with mock.patch.object(ws, "MESSAGE_LIMITS", (5,)):
+            for _ in range(4):
+                status = self.poll(self.client(rows))
+        self.assertEqual(status["ready_handoffs"], [])
+        self.assertEqual(self.reason(), "message_not_in_bounded_page")
+
+
+class GatewayRecovery(unittest.TestCase):
+    THREAD = "33333333-3333-4333-8333-333333333333"
+    THREAD_2 = "44444444-4444-4444-8444-444444444444"
+    JOB_A = "00000000-0000-4000-8000-000000000001"
+    JOB_B = "00000000-0000-4000-8000-000000000002"
+    JOB_C = "00000000-0000-4000-8000-000000000003"
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.runtime = self.root / "D80-runtime"
+        self.jobs = self.runtime / "jobs"
+        self.jobs.mkdir(parents=True)
+        self.node = self.root / "node.exe"
+        self.node.write_bytes(b"node fixture")
+        self.entrypoint = self.root / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+        self.entrypoint.parent.mkdir(parents=True)
+        self.entrypoint.write_text("// official path fixture", encoding="utf-8")
+        self.ledger_dir = self.root / "ledger"
+        self.addCleanup(self.temp.cleanup)
+        self.conn = ws.connect(self.ledger_dir)
+        self.addCleanup(self.close_connection)
+
+    def close_connection(self):
+        connection = getattr(self, "conn", None)
+        if connection is not None:
+            connection.close()
+
+    @staticmethod
+    def jsonl(text="final", thread=None, *, terminal="turn.completed", extra_after=False, two_threads=False):
+        thread = thread or GatewayRecovery.THREAD
+        events = [{"type": "thread.started", "thread_id": thread}]
+        if two_threads:
+            events.append({"type": "thread.started", "thread_id": GatewayRecovery.THREAD_2})
+        events.append({"type": "item.completed", "thread_id": thread,
+                       "item": {"id": "item-final", "type": "agent_message", "text": text}})
+        events.append({"type": terminal, "thread_id": thread})
+        if extra_after:
+            events.append({"type": "item.started", "thread_id": thread, "item": {"id": "after"}})
+        return b"".join(json.dumps(event, ensure_ascii=False).encode("utf-8") + b"\n" for event in events)
+
+    def create_job(self, job_id=None, *, text="final", status="exited", exit_code=0, data=None, stdout_ref=None):
+        job_id = job_id or self.JOB_A
+        directory = self.jobs / job_id
+        directory.mkdir(parents=True, exist_ok=True)
+        metadata = {"job_id": job_id, "status": status, "exit_code": exit_code, "started_at": 123.0,
+                    "command": [str(self.node), str(self.entrypoint), "exec", "-m", "gpt-test", "--json", "private prompt"],
+                    "cwd": str(self.root / "D41-checkout"), "runtime_dir": str(self.runtime),
+                    "stdout_path": stdout_ref or str(directory / "stdout.log")}
+        (directory / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+        (directory / "stdout.log").write_bytes(self.jsonl(text) if data is None else data)
+        return directory, metadata
+
+    def observe(self, now=None):
+        now = time.time() if now is None else now
+        plan = ws.make_plan(self.conn, now)
+        fetched = ws.Fetched(now)
+        fetched.gateway_cursor = plan.get("gateway_cursor", "")
+        fetched.gateway_previous = plan.get("gateway_jobs", {})
+        with mock.patch("home_mcp_gateway.jobs.runtime_root", return_value=self.runtime):
+            asyncio.run(ws._fetch_jobs(fetched))
+        return fetched, plan
+
+    def poll_gateway(self, now=None, conn=None):
+        conn = conn or self.conn
+        now = time.time() if now is None else now
+        plan = ws.make_plan(conn, now)
+        fetched = ws.Fetched(now)
+        fetched.gateway_cursor = plan.get("gateway_cursor", "")
+        fetched.gateway_previous = plan.get("gateway_jobs", {})
+        with mock.patch("home_mcp_gateway.jobs.runtime_root", return_value=self.runtime):
+            asyncio.run(ws._fetch_jobs(fetched))
+        return ws.commit(conn, fetched, plan), fetched
+
+    def count(self, table):
+        return self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+    def test_exited_zero_preserves_exact_final_text_and_atomic_handoff(self):
+        original = "  final\nbody with spacing  "
+        self.create_job(text=original)
+        summary, fetched = self.poll_gateway(1000)
+        row = self.conn.execute("SELECT * FROM handoffs").fetchone()
+        self.assertEqual(row["result_text"], original)
+        self.assertEqual(row["result_digest"], hashlib.sha256(original.encode("utf-8")).hexdigest())
+        self.assertEqual((row["source_type"], row["source_id"], row["provider"], row["terminal_status"]),
+                         ("gateway_codex", self.JOB_A, "codex-cli", "turn_completed"))
+        self.assertEqual((self.count("handoffs"), self.count("outbox")), (1, 1))
+        prov = ws.pending_view(self.conn, 1000)["items"][0]["gateway_provenance"]
+        self.assertEqual((prov["job_id"], prov["thread_id"], prov["execution_status"], prov["result_digest"]),
+                         (self.JOB_A, self.THREAD, "succeeded", hashlib.sha256(original.encode("utf-8")).hexdigest()))
+        status_json = json.dumps(ws.build_status(self.conn, 1000))
+        self.assertNotIn("private prompt", status_json)
+        self.assertNotIn(original, status_json)
+        self.assertEqual(fetched.gateway_summary["handoffs"], 1)
+
+    def test_running_linger_saves_turn_without_claiming_execution_success(self):
+        self.create_job(status="running", exit_code=None, text="completed turn")
+        self.poll_gateway(1000)
+        status = ws.build_status(self.conn, 1000)
+        row = self.conn.execute("SELECT terminal_status FROM handoffs").fetchone()
+        self.assertEqual(row[0], "turn_completed")
+        self.assertEqual(status["gateway_codex"]["jobs"][0]["execution_status"], "unknown")
+        self.assertEqual(status["gateway_codex"]["jobs"][0]["process_status"], "running")
+
+    def test_normal_process_metadata_updates_do_not_change_launch_identity(self):
+        directory, metadata = self.create_job(status="running", exit_code=None, text="linger")
+        self.poll_gateway(1000)
+        before = self.conn.execute("SELECT launch_identity,handoff_id FROM gateway_jobs").fetchone()
+        metadata.update(status="exited", exit_code=0, finished_at=124.0, pid=1234, worker_pid=5678)
+        (directory / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+        self.poll_gateway(1001)
+        after = self.conn.execute("SELECT launch_identity,handoff_id,process_status,exit_code,execution_status FROM gateway_jobs").fetchone()
+        self.assertEqual((after["launch_identity"], after["handoff_id"]), (before["launch_identity"], before["handoff_id"]))
+        self.assertEqual((after["process_status"], after["exit_code"], after["execution_status"]), ("exited", 0, "succeeded"))
+        self.assertEqual((self.count("handoffs"), self.count("outbox")), (1, 1))
+
+    def test_nonzero_process_exit_is_reported_separately_from_completed_turn(self):
+        self.create_job(status="exited", exit_code=17, text="turn text")
+        self.poll_gateway(1000)
+        row = self.conn.execute("SELECT terminal_status FROM handoffs").fetchone()
+        self.assertEqual(row[0], "turn_completed")
+        job = ws.build_status(self.conn, 1000)["gateway_codex"]["jobs"][0]
+        self.assertEqual((job["turn_status"], job["execution_status"], job["error_code"]),
+                         ("turn_completed", "failed", "nonzero_exit"))
+
+    def test_same_payload_on_different_jobs_has_distinct_handoffs(self):
+        self.create_job(self.JOB_A, text="same")
+        self.create_job(self.JOB_B, text="same")
+        self.poll_gateway(1000)
+        self.poll_gateway(1001)
+        self.assertEqual(self.count("handoffs"), 2)
+        ids = {row[0] for row in self.conn.execute("SELECT handoff_id FROM handoffs")}
+        self.assertEqual(ids, {f"gateway-codex:{self.JOB_A}:{self.THREAD}", f"gateway-codex:{self.JOB_B}:{self.THREAD}"})
+
+    def test_replay_restart_and_received_acknowledged_state_are_exactly_once(self):
+        self.create_job(text="persist")
+        self.poll_gateway(1000)
+        hid = f"gateway-codex:{self.JOB_A}:{self.THREAD}"
+        digest = self.conn.execute("SELECT result_digest FROM outbox WHERE handoff_id=?", (hid,)).fetchone()[0]
+        ws.record_receipt(self.conn, [f"{hid}={digest}"], root_source_id="root-test", root_epoch=1, now=1001)
+        ws.acknowledge(self.conn, [f"handoff:{hid}"], now=1002)
+        self.poll_gateway(1003)
+        self.assertEqual(self.conn.execute("SELECT delivery_state FROM outbox WHERE handoff_id=?", (hid,)).fetchone()[0], "received")
+        self.assertEqual(self.conn.execute("SELECT state FROM handoffs WHERE handoff_id=?", (hid,)).fetchone()[0], "acked")
+        self.assertEqual(ws.pending_view(self.conn, 1003)["items"], [])
+        self.conn.close()
+        self.conn = ws.connect(self.ledger_dir)
+        self.poll_gateway(1004)
+        self.assertEqual((self.count("handoffs"), self.count("outbox")), (1, 1))
+        self.assertEqual(self.conn.execute("SELECT state FROM handoffs WHERE handoff_id=?", (hid,)).fetchone()[0], "acked")
+
+    def test_transaction_rollback_replays_without_duplicate(self):
+        self.create_job(text="rollback")
+        fetched, plan = self.observe(1000)
+        with mock.patch.object(ws, "_insert_handoff", side_effect=sqlite3.OperationalError("fixture")):
+            with self.assertRaises(sqlite3.OperationalError):
+                ws.commit(self.conn, fetched, plan)
+        self.assertEqual((self.count("gateway_jobs"), self.count("handoffs"), self.count("outbox")), (0, 0, 0))
+        ws.commit(self.conn, fetched, plan)
+        ws.commit(self.conn, fetched, plan)
+        self.assertEqual((self.count("gateway_jobs"), self.count("handoffs"), self.count("outbox")), (1, 1, 1))
+
+    def test_changed_result_for_a_pinned_job_is_quarantined_without_replacing_body(self):
+        directory, _ = self.create_job(text="original")
+        self.poll_gateway(1000)
+        handoff = self.conn.execute("SELECT handoff_id,result_text,result_digest FROM handoffs").fetchone()
+        changed = self.jsonl("rewritten", thread=self.THREAD_2)
+        (directory / "stdout.log").write_bytes(changed)
+        self.poll_gateway(1001)
+        after = self.conn.execute("SELECT handoff_id,result_text,result_digest,state FROM handoffs").fetchone()
+        self.assertEqual(tuple(after), (handoff["handoff_id"], handoff["result_text"], handoff["result_digest"], "ready"))
+        self.assertEqual(self.conn.execute("SELECT result_state,error_code FROM gateway_jobs").fetchone()[:],
+                         ("conflict", "result_identity_conflict"))
+        self.assertEqual(self.count("outbox"), 1)
+
+    def test_changed_launch_identity_for_a_pinned_job_is_quarantined(self):
+        directory, metadata = self.create_job(text="identity")
+        self.poll_gateway(1000)
+        original = self.conn.execute("SELECT result_text,result_digest FROM handoffs").fetchone()
+        metadata["command"][-1] = "changed private prompt"
+        (directory / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+        self.poll_gateway(1001)
+        self.assertEqual(tuple(self.conn.execute("SELECT result_text,result_digest FROM handoffs").fetchone()), tuple(original))
+        self.assertEqual(self.conn.execute("SELECT result_state,error_code FROM gateway_jobs").fetchone()[:],
+                         ("conflict", "launch_identity_conflict"))
+        self.assertEqual(self.count("outbox"), 1)
+        with (directory / "stdout.log").open("ab") as stream:
+            stream.write(b"changed after conflict\n")
+        self.poll_gateway(1002)
+        self.assertEqual(self.conn.execute("SELECT result_state,error_code FROM gateway_jobs").fetchone()[:],
+                         ("conflict", "launch_identity_conflict"))
+        self.assertEqual(self.count("outbox"), 1)
+
+    def test_changed_thread_identity_with_same_body_is_quarantined(self):
+        directory, _ = self.create_job(text="same body")
+        self.poll_gateway(1000)
+        original = self.conn.execute("SELECT handoff_id,result_text,result_digest FROM handoffs").fetchone()
+        (directory / "stdout.log").write_bytes(self.jsonl("same body", thread=self.THREAD_2))
+        self.poll_gateway(1001)
+        self.assertEqual(tuple(self.conn.execute("SELECT handoff_id,result_text,result_digest FROM handoffs").fetchone()),
+                         tuple(original))
+        self.assertEqual(self.conn.execute("SELECT result_state FROM gateway_jobs").fetchone()[0], "conflict")
+        self.assertEqual(self.count("outbox"), 1)
+
+    def test_path_identity_partial_invalid_terminal_and_multithread_rejects(self):
+        bad = [
+            (self.JOB_A, {"stdout_ref": str(self.root / "outside.log")}, self.jsonl("path")),
+            (self.JOB_B, {}, self.jsonl("mismatch")),
+            (self.JOB_C, {}, self.jsonl("partial")[:-1]),
+        ]
+        for job_id, options, data in bad:
+            directory, metadata = self.create_job(job_id, data=data, **options)
+            if job_id == self.JOB_B:
+                metadata["job_id"] = self.JOB_A
+                (directory / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+        invalid_utf = "55555555-5555-4555-8555-555555555555"
+        self.create_job(invalid_utf, data=b"\xff\n")
+        no_final = "66666666-6666-4666-8666-666666666666"
+        self.create_job(no_final, data=self.jsonl(terminal="item.started"))
+        multiple = "77777777-7777-4777-8777-777777777777"
+        self.create_job(multiple, data=self.jsonl(two_threads=True))
+        after_terminal = "88888888-8888-4888-8888-888888888888"
+        self.create_job(after_terminal, data=self.jsonl(extra_after=True))
+        multiple_terminal = "99999999-9999-4999-8999-999999999999"
+        self.create_job(multiple_terminal, data=self.jsonl() + json.dumps(
+            {"type": "turn.completed", "thread_id": self.THREAD}).encode("utf-8") + b"\n")
+        with mock.patch.object(ws, "GATEWAY_MAX_JOBS_PER_POLL", 20):
+            self.poll_gateway(1000)
+        self.assertEqual(self.count("handoffs"), 0)
+        errors = {row["job_id"]: row["error_code"] for row in self.conn.execute("SELECT job_id,error_code FROM gateway_jobs")}
+        self.assertEqual(errors[self.JOB_A], "stdout_reference_mismatch")
+        self.assertEqual(errors[self.JOB_B], "metadata_job_id_mismatch")
+        self.assertIn(errors[self.JOB_C], {"partial_jsonl", "invalid_jsonl"})
+        self.assertEqual(errors[invalid_utf], "invalid_jsonl")
+        self.assertEqual(errors[no_final], "terminal_record_invalid")
+        self.assertEqual(errors[multiple], "thread_identity_invalid")
+        self.assertEqual(errors[after_terminal], "events_after_terminal")
+        self.assertEqual(errors[multiple_terminal], "terminal_record_invalid")
+
+    def test_oversized_job_and_rotation_do_not_starve_valid_jobs(self):
+        self.create_job(self.JOB_A, data=self.jsonl("x" * 700))
+        self.create_job(self.JOB_B, text="b")
+        self.create_job(self.JOB_C, text="c")
+        with mock.patch.object(ws, "GATEWAY_MAX_JOBS_PER_POLL", 1), \
+             mock.patch.object(ws, "GATEWAY_MAX_FILE_BYTES", 600), \
+             mock.patch.object(ws, "GATEWAY_MAX_BYTES_PER_POLL", 600):
+            for t in range(4):
+                self.poll_gateway(1000 + t)
+        self.assertEqual(self.count("handoffs"), 2)
+        self.assertEqual(self.conn.execute("SELECT result_state FROM gateway_jobs WHERE job_id=?", (self.JOB_A,)).fetchone()[0],
+                         "pending")
+
+    def test_aggregate_byte_budget_rotates_the_deferred_job_next_poll(self):
+        self.create_job(self.JOB_A, text="a")
+        self.create_job(self.JOB_B, text="b")
+        budget = len(self.jsonl("a"))
+        with mock.patch.object(ws, "GATEWAY_MAX_JOBS_PER_POLL", 1), \
+             mock.patch.object(ws, "GATEWAY_MAX_FILE_BYTES", budget + 10), \
+             mock.patch.object(ws, "GATEWAY_MAX_BYTES_PER_POLL", budget):
+            self.poll_gateway(1000)
+            self.assertEqual(self.count("handoffs"), 1)
+            self.poll_gateway(1031)
+        self.assertEqual(self.count("handoffs"), 2)
+
+    def test_aggregate_byte_deferral_rotates_even_when_job_count_is_capped(self):
+        self.create_job(self.JOB_A, text="a")
+        self.create_job(self.JOB_B, text="b")
+        self.create_job(self.JOB_C, text="c")
+        budget = len(self.jsonl("a"))
+        with mock.patch.object(ws, "GATEWAY_MAX_JOBS_PER_POLL", 2), \
+             mock.patch.object(ws, "GATEWAY_MAX_FILE_BYTES", budget + 10), \
+             mock.patch.object(ws, "GATEWAY_MAX_BYTES_PER_POLL", budget):
+            self.poll_gateway(1000)
+            self.assertEqual(self.count("handoffs"), 1)
+            self.poll_gateway(1031)
+            self.assertEqual(self.count("handoffs"), 2)
+            self.poll_gateway(1062)
+        self.assertEqual(self.count("handoffs"), 3)
+
+    @staticmethod
+    def _job_id(index):
+        return f"{index:08x}-0000-4000-8000-{index:012x}"
+
+    def test_new_result_is_collected_ahead_of_large_existing_history(self):
+        old_ids = [self._job_id(index) for index in range(1, 31)]
+        for job_id in old_ids:
+            self.create_job(job_id, text="historical")
+        with mock.patch.object(ws, "GATEWAY_MAX_JOBS_PER_POLL", 4):
+            for t in range(30):
+                self.poll_gateway(1000 + t)
+            self.assertEqual(self.count("handoffs"), len(old_ids))
+            new_id = self._job_id(1000)
+            self.create_job(new_id, text="new result")
+            summary, fetched = self.poll_gateway(1100)
+        self.assertIn(new_id, {item["source_id"] for item in self.conn.execute("SELECT source_id FROM handoffs")})
+        self.assertEqual(summary["gateway_handoffs"], 1)
+        self.assertIn(new_id, {item["job_id"] for item in fetched.gateway_observations})
+
+    def test_non_codex_jobs_do_not_occupy_new_result_priority_slots(self):
+        for index in range(1, 7):
+            directory, metadata = self.create_job(self._job_id(index), text="not codex")
+            metadata["command"] = [str(self.node), "not-codex"]
+            (directory / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+        new_id = self._job_id(1000)
+        self.create_job(new_id, text="new codex result")
+        with mock.patch.object(ws, "GATEWAY_MAX_JOBS_PER_POLL", 2):
+            summary, fetched = self.poll_gateway(1000)
+        self.assertIn(new_id, {item["job_id"] for item in fetched.gateway_observations})
+        self.assertEqual(summary["gateway_handoffs"], 1)
+        self.assertEqual(self.conn.execute("SELECT source_id FROM handoffs").fetchone()[0], new_id)
+
+    def test_priority_hint_checks_directory_containment_before_metadata_read(self):
+        directory, _ = self.create_job()
+        outside = self.root / "outside" / self.JOB_A
+        original_resolve = type(directory).resolve
+        original_read = ws._read_stable_file
+        metadata_read_attempts = 0
+        containment_resolution_calls = 0
+
+        def resolve(path, strict=False):
+            nonlocal containment_resolution_calls
+            if path == directory:
+                containment_resolution_calls += 1
+                return outside
+            return original_resolve(path, strict=strict)
+
+        def read_stable_file(path, max_bytes):
+            nonlocal metadata_read_attempts
+            if path.name == "metadata.json":
+                metadata_read_attempts += 1
+            return original_read(path, max_bytes)
+
+        with mock.patch.object(type(directory), "resolve", autospec=True, side_effect=resolve), \
+             mock.patch.object(ws, "_read_stable_file", side_effect=read_stable_file):
+            hint = ws._gateway_priority_hint(self.JOB_A, directory, None, self.jobs)
+
+        self.assertIsNone(hint)
+        self.assertEqual(metadata_read_attempts, 0)
+        self.assertEqual(containment_resolution_calls, 1)
+
+    def test_completed_transition_outranks_streaming_running_jobs(self):
+        done_id = self._job_id(1)
+        running_ids = [self._job_id(index) for index in range(2, 8)]
+        partial = self.jsonl()[:70]
+        self.create_job(done_id, status="running", exit_code=None, data=partial)
+        for job_id in running_ids:
+            self.create_job(job_id, status="running", exit_code=None, data=partial)
+        with mock.patch.object(ws, "GATEWAY_MAX_JOBS_PER_POLL", 8):
+            self.poll_gateway(1000)
+        self.create_job(done_id, text="finished")
+        for job_id in running_ids:
+            self.create_job(job_id, status="running", exit_code=None, data=partial + b" ")
+        past = time.time_ns()
+        os.utime(self.jobs / done_id / "stdout.log", ns=(past - 10**12, past - 10**12))
+        os.utime(self.jobs / done_id / "metadata.json", ns=(past - 10**12, past - 10**12))
+        with mock.patch.object(ws, "GATEWAY_MAX_JOBS_PER_POLL", 2):
+            _, fetched = self.poll_gateway(1100)
+        self.assertIn(done_id, {item["job_id"] for item in fetched.gateway_observations})
+
+    def test_history_cursor_advances_while_new_results_keep_arriving(self):
+        old_ids = [self._job_id(index) for index in range(1, 11)]
+        partial = self.jsonl()[:70]
+        for job_id in old_ids:
+            self.create_job(job_id, status="running", exit_code=None, data=partial)
+        with mock.patch.object(ws, "GATEWAY_MAX_JOBS_PER_POLL", 20):
+            self.poll_gateway(1000)
+        first_cursor = self.conn.execute("SELECT value FROM meta WHERE key='gateway_cursor'").fetchone()[0]
+        with mock.patch.object(ws, "GATEWAY_MAX_JOBS_PER_POLL", 4):
+            for offset in range(1, 4):
+                self.create_job(self._job_id(1000 + offset), text=f"new-{offset}")
+                self.poll_gateway(1000 + offset)
+        final_cursor = self.conn.execute("SELECT value FROM meta WHERE key='gateway_cursor'").fetchone()[0]
+        self.assertNotEqual(final_cursor, first_cursor)
+        self.assertGreater(self.conn.execute("SELECT observed_at FROM gateway_jobs WHERE job_id=?", (old_ids[0],)).fetchone()[0], 1000)
+
+    def test_priority_and_history_byte_budgets_rotate_without_duplicate_handoffs(self):
+        job_ids = [self._job_id(index) for index in range(1, 5)]
+        for job_id in job_ids:
+            self.create_job(job_id, text="x")
+        budget = 2 * len(self.jsonl("x"))
+        with mock.patch.object(ws, "GATEWAY_MAX_JOBS_PER_POLL", 4), \
+             mock.patch.object(ws, "GATEWAY_MAX_FILE_BYTES", budget), \
+             mock.patch.object(ws, "GATEWAY_MAX_BYTES_PER_POLL", budget):
+            self.poll_gateway(1000)
+            self.poll_gateway(1031)
+        self.assertEqual(self.count("handoffs"), 4)
+        self.assertEqual(self.count("outbox"), 4)
+        self.assertEqual(self.conn.execute("SELECT COUNT(DISTINCT handoff_id) FROM handoffs").fetchone()[0], 4)
+
+    def test_growth_between_stat_and_read_cannot_exceed_poll_byte_limit(self):
+        directory, _ = self.create_job(self.JOB_A, text="a")
+        self.create_job(self.JOB_B, text="b")
+        budget = len(self.jsonl("a"))
+        reader = ws._read_stable_file
+        grew = False
+
+        def grow_then_read(path, max_bytes):
+            nonlocal grew
+            if path.name == "stdout.log" and path.parent.name == self.JOB_A and not grew:
+                grew = True
+                with path.open("ab") as stream:
+                    stream.write(b"z" * 200)
+            return reader(path, max_bytes)
+
+        with mock.patch.object(ws, "GATEWAY_MAX_JOBS_PER_POLL", 1), \
+             mock.patch.object(ws, "GATEWAY_MAX_FILE_BYTES", budget + 500), \
+             mock.patch.object(ws, "GATEWAY_MAX_BYTES_PER_POLL", budget), \
+             mock.patch.object(ws, "_read_stable_file", side_effect=grow_then_read):
+            self.poll_gateway(1000)
+            self.poll_gateway(1031)
+        self.assertTrue(grew)
+        self.assertEqual(self.count("handoffs"), 1)
+        self.assertEqual(self.conn.execute("SELECT result_state,error_code FROM gateway_jobs WHERE job_id=?",
+                                           (self.JOB_A,)).fetchone()[:], ("pending", "poll_byte_budget"))
+        self.assertEqual(self.conn.execute("SELECT source_id FROM handoffs").fetchone()[0], self.JOB_B)
+
+    def test_running_job_final_append_is_new_evidence_during_backoff(self):
+        directory, _ = self.create_job(status="running", exit_code=None, data=self.jsonl()[:70])
+        fetched, plan = self.observe(1000)
+        ws.commit(self.conn, fetched, plan)
+        log = directory / "stdout.log"
+        with log.open("ab") as stream:
+            stream.write(self.jsonl()[70:])
+        plan = ws.make_plan(self.conn, 1001)
+        fetched = ws.Fetched(1001)
+        fetched.gateway_cursor = plan["gateway_cursor"]
+        fetched.gateway_previous = plan["gateway_jobs"]
+        with mock.patch("home_mcp_gateway.jobs.runtime_root", return_value=self.runtime):
+            asyncio.run(ws._fetch_jobs(fetched))
+        self.assertEqual(fetched.gateway_observations[0]["result_state"], "succeeded")
+        self.assertNotIn("reuse", fetched.gateway_observations[0])
+        ws.commit(self.conn, fetched, plan)
+        self.assertEqual(self.count("handoffs"), 1)
+        row = self.conn.execute("SELECT process_status,execution_status FROM gateway_jobs").fetchone()
+        self.assertEqual(tuple(row), ("running", "unknown"))
+
+    def test_identity_conflict_does_not_reopen_backoff_on_stdout_stat_change(self):
+        conflicting = self.jsonl() + json.dumps({
+            "type": "item.started", "thread_id": self.THREAD_2,
+        }).encode("utf-8") + b"\n"
+        directory, _ = self.create_job(status="running", exit_code=None, data=conflicting)
+        self.poll_gateway(1000)
+        self.assertEqual(self.conn.execute("SELECT error_code FROM gateway_jobs").fetchone()[0], "thread_identity_conflict")
+        with (directory / "stdout.log").open("ab") as stream:
+            stream.write(self.jsonl()[0:20])
+        plan = ws.make_plan(self.conn, 1001)
+        fetched = ws.Fetched(1001)
+        fetched.gateway_cursor = plan["gateway_cursor"]
+        fetched.gateway_previous = plan["gateway_jobs"]
+        with mock.patch("home_mcp_gateway.jobs.runtime_root", return_value=self.runtime), \
+             mock.patch.object(ws.work_dispatcher_codex, "parse_codex_jsonl", side_effect=AssertionError("identity conflict stays backed off")):
+            asyncio.run(ws._fetch_jobs(fetched))
+        self.assertTrue(fetched.gateway_observations[0]["reuse"])
+        self.assertEqual(fetched.gateway_observations[0]["error_code"], "thread_identity_conflict")
+
+    def test_gateway_collection_survives_aotalk_configuration_failure(self):
+        self.create_job(text="offline local result")
+        with mock.patch("home_mcp_gateway.jobs.runtime_root", return_value=self.runtime), \
+             mock.patch.object(aoitalk, "load_settings", side_effect=aoitalk.ClipError("connection_error")):
+            fetched = asyncio.run(ws.default_fetch(ws.make_plan(self.conn, 1000)))
+        self.assertIn("gateway_codex", fetched.sources)
+        self.assertEqual(fetched.sources["aoitalk"]["error"], "configuration_error")
+        ws.commit(self.conn, fetched, ws.make_plan(self.conn, 1000))
+        self.assertEqual(self.count("handoffs"), 1)
+        status = ws.build_status(self.conn, 1000)
+        self.assertFalse(status["source_completeness"]["aoitalk"]["fresh"])
+        self.assertTrue(status["source_completeness"]["gateway_codex"]["fresh"])
+
+    def test_gateway_source_failure_is_not_reported_fresh(self):
+        plan = ws.make_plan(self.conn, 1000)
+        fetched = ws.Fetched(1000)
+        with mock.patch.object(ws, "_scan_gateway_jobs", side_effect=ws.SupervisorError("runtime_unavailable")):
+            asyncio.run(ws._fetch_jobs(fetched))
+        ws.commit(self.conn, fetched, plan)
+        status = ws.build_status(self.conn, 1000)
+        self.assertFalse(status["source_completeness"]["jobs"]["fresh"])
+        self.assertFalse(status["source_completeness"]["gateway_codex"]["fresh"])
+
+    def test_gateway_collection_survives_aotalk_login_failure(self):
+        self.create_job(text="offline after login error")
+        failure = ws.cli.CliSessionError("authentication_failed", 401)
+        with mock.patch("home_mcp_gateway.jobs.runtime_root", return_value=self.runtime), \
+             mock.patch.object(aoitalk, "load_settings", return_value=SETTINGS), \
+             mock.patch.object(ws.cli.CliSessionClient, "login_cli_session", new=mock.AsyncMock(side_effect=failure)):
+            fetched = asyncio.run(ws.default_fetch(ws.make_plan(self.conn, 1000)))
+        self.assertEqual(fetched.sources["aoitalk"]["error"], "authentication_failed")
+        ws.commit(self.conn, fetched, ws.make_plan(self.conn, 1000))
+        self.assertEqual(self.count("handoffs"), 1)
+
+    def test_show_includes_gateway_provenance_and_verified_digest(self):
+        self.create_job(text="show me")
+        self.poll_gateway(1000)
+        handoff = self.conn.execute("SELECT handoff_id FROM handoffs").fetchone()[0]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(ws.main(["--dir", str(self.ledger_dir), "show", handoff]), 0)
+        shown = json.loads(output.getvalue())
+        self.assertTrue(shown["digest_verified"])
+        self.assertEqual(shown["gateway_provenance"]["thread_id"], self.THREAD)
+        self.assertEqual(shown["result_text"], "show me")
+
+
+class GatewayLedgerMigration(unittest.TestCase):
+    def test_v4_to_v5_is_backup_backed_and_does_not_rewrite_delivery_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            conn = ws.connect(directory)
+            ws._insert_handoff(conn, handoff_id="legacy:one", source_type="task", source_id="a" * 32,
+                               provider=None, status="completed", now=10, text="existing result")
+            digest = conn.execute("SELECT result_digest FROM outbox WHERE handoff_id='legacy:one'").fetchone()[0]
+            ws.record_receipt(conn, [f"legacy:one={digest}"], root_source_id="root-test", root_epoch=1, now=11)
+            ws.acknowledge(conn, ["handoff:legacy:one"], now=12)
+            conn.execute("INSERT OR IGNORE INTO source_heartbeats(source_id,source_type,observed_at,via,error_code) VALUES('old','observer_source',1,'monitor',NULL)")
+            before = {table: [tuple(row) for row in conn.execute(f"SELECT * FROM {table}")]
+                      for table in ("handoffs", "outbox", "acknowledgments", "source_heartbeats")}
+            conn.execute("DROP TABLE gateway_jobs")
+            conn.execute("UPDATE meta SET value='4' WHERE key='ledger_version'")
+            conn.close()
+            conn = ws.connect(directory)
+            try:
+                self.assertEqual(conn.execute("SELECT value FROM meta WHERE key='ledger_version'").fetchone()[0], "5")
+                for table in ("handoffs", "outbox", "acknowledgments", "source_heartbeats"):
+                    self.assertEqual([tuple(row) for row in conn.execute(f"SELECT * FROM {table}")], before[table])
+                backup = list(directory.glob("state.sqlite3.pre-v5-*.bak"))
+                self.assertEqual(len(backup), 1)
+                with contextlib.closing(sqlite3.connect(backup[0])) as old:
+                    self.assertIsNone(old.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='gateway_jobs'").fetchone())
+            finally:
+                conn.close()

@@ -11,10 +11,12 @@ import time
 from typing import Any
 import uuid
 import hashlib
+import math
 
 import psutil
 
 from .core import _decode
+from .work_dispatcher_codex import APP_SERVER_TRANSPORT
 
 ACTIVE = {"starting", "running", "stopping"}
 
@@ -93,7 +95,8 @@ def _explicit_env_digest(env: dict[str, str] | None) -> str:
 
 def _keyed_fingerprint_from_env_digest(command: str | list[str], cwd: str, explicit_env_digest: str,
                                        request_fingerprint: str | None,
-                                       dispatcher_binding: dict[str, Any] | None) -> str:
+                                       dispatcher_binding: dict[str, Any] | None,
+                                       transport: str | None = None, app_server: dict[str, Any] | None = None) -> str:
     """Rebuild keyed identity from immutable request fields without consulting process environment."""
     if isinstance(command, str):
         normalized_command: Any = {"shell": command}
@@ -101,13 +104,17 @@ def _keyed_fingerprint_from_env_digest(command: str | list[str], cwd: str, expli
         normalized_command = {"argv": command}
     payload = {"command": normalized_command, "cwd": cwd, "env_sha256": explicit_env_digest,
                "request_fingerprint": request_fingerprint, "dispatcher_binding": dispatcher_binding}
+    if transport is not None:
+        payload.update(transport=transport, app_server=app_server)
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
 def _keyed_fingerprint(command: str | list[str], cwd: str, env: dict[str, str] | None,
-                       request_fingerprint: str | None, dispatcher_binding: dict[str, Any] | None) -> str:
+                       request_fingerprint: str | None, dispatcher_binding: dict[str, Any] | None,
+                       transport: str | None = None, app_server: dict[str, Any] | None = None) -> str:
     """Hash the explicit immutable keyed launch request without exposing env values."""
-    return _keyed_fingerprint_from_env_digest(command, cwd, _explicit_env_digest(env), request_fingerprint, dispatcher_binding)
+    return _keyed_fingerprint_from_env_digest(command, cwd, _explicit_env_digest(env), request_fingerprint, dispatcher_binding,
+                                               transport, app_server)
 
 
 def _dispatcher_binding_valid(binding: Any) -> bool:
@@ -137,7 +144,8 @@ def _dispatcher_binding_valid(binding: Any) -> bool:
 
 def identity(pid: int | None, create_time: float | None) -> str:
     """Never identify a process by PID alone, including on reboot/PID reuse."""
-    if pid is None or create_time is None:
+    if (type(pid) is not int or pid <= 0 or type(create_time) not in (int, float)
+            or not math.isfinite(create_time) or create_time <= 0):
         return "missing"
     try:
         proc = psutil.Process(pid)
@@ -150,7 +158,8 @@ def identity(pid: int | None, create_time: float | None) -> str:
         return "access_denied"
 
 
-def _terminate_tree(pid: int, create_time: float, force: bool = True) -> dict:
+def _terminate_tree(pid: int, create_time: float, force: bool = True, *,
+                    deadline_monotonic: float | None = None) -> dict:
     state = identity(pid, create_time)
     if state != "alive":
         return {"identity": state, "affected_pids": []}
@@ -169,7 +178,8 @@ def _terminate_tree(pid: int, create_time: float, force: bool = True) -> dict:
             pass
         except psutil.AccessDenied as exc:
             errors.append(str(exc))
-    _, alive = psutil.wait_procs(targets, timeout=2)
+    wait_timeout = 2 if deadline_monotonic is None else min(2, max(0.0, deadline_monotonic - time.monotonic()))
+    _, alive = psutil.wait_procs(targets, timeout=wait_timeout)
     return {"identity": state, "affected_pids": affected, "remaining_pids": [p.pid for p in alive], "errors": errors}
 
 
@@ -226,7 +236,8 @@ def _last_output(result: dict[str, Any], max_bytes: int = 4000) -> str:
 def job_start(command: str | list[str], cwd: str | None = None, env: dict[str, str] | None = None,
               runtime_dir: str | None = None, *, idempotency_key: str | None = None,
               request_fingerprint: str | None = None,
-              dispatcher_binding: dict[str, Any] | None = None) -> dict[str, Any]:
+              dispatcher_binding: dict[str, Any] | None = None,
+              transport: str | None = None, app_server: dict[str, Any] | None = None) -> dict[str, Any]:
     """Start a persistent Windows workspace job. String command uses the workspace shell; argv list avoids shell quoting. Returns job ID, identity, logs and Git provenance."""
     keyed = idempotency_key is not None
     if keyed:
@@ -238,12 +249,30 @@ def job_start(command: str | list[str], cwd: str | None = None, env: dict[str, s
     elif request_fingerprint is not None or dispatcher_binding is not None:
         return {"ok": False, "error": "invalid_idempotency_binding", "status": "unknown"}
     working = str(Path(cwd or os.getcwd()).expanduser().resolve())
+    if transport is not None or app_server is not None:
+        if not keyed or not _dispatcher_binding_valid(dispatcher_binding) or transport != APP_SERVER_TRANSPORT:
+            return {"ok": False, "error": "invalid_app_server_binding", "status": "unknown"}
+        try:
+            from .work_dispatcher_codex import app_server_enabled, validate_app_server_command, validate_app_server_spec
+            if not app_server_enabled():
+                return {"ok": False, "error": "app_server_disabled", "status": "unknown"}
+            app_server = validate_app_server_spec(app_server, cwd=working)
+            command = validate_app_server_command(command)
+            if env:
+                raise ValueError("app_server_environment_not_pinned")
+        except (ValueError, TypeError, OSError, UnicodeError):
+            return {"ok": False, "error": "invalid_app_server_spec", "status": "unknown"}
     child_env = dict(os.environ)
     child_env.update(env or {})
     explicit_env_digest = _explicit_env_digest(env) if keyed else None
-    request_hash = (_keyed_fingerprint_from_env_digest(command, working, explicit_env_digest, request_fingerprint, dispatcher_binding)
+    request_hash = (_keyed_fingerprint_from_env_digest(command, working, explicit_env_digest, request_fingerprint, dispatcher_binding,
+                                                       transport, app_server)
                     if keyed else None)
     job_id = stable_job_id(idempotency_key) if keyed else str(uuid.uuid4())
+    if transport is not None and (dispatcher_binding["gateway_job_id"] != job_id
+                                  or dispatcher_binding["op_key"] != idempotency_key
+                                  or dispatcher_binding["request_fingerprint"] != request_fingerprint):
+        return {"ok": False, "error": "invalid_app_server_binding", "status": "unknown"}
     directory = _directory(job_id, runtime_dir)
     if keyed:
         directory.parent.mkdir(parents=True, exist_ok=True)
@@ -259,7 +288,8 @@ def job_start(command: str | list[str], cwd: str | None = None, env: dict[str, s
             if (state.get("idempotency_key") != idempotency_key or state.get("request_fingerprint") != request_hash
                     or state.get("explicit_env_digest") != explicit_env_digest
                     or state.get("command") != command or state.get("cwd") != working
-                    or state.get("dispatcher_binding") != dispatcher_binding):
+                    or state.get("dispatcher_binding") != dispatcher_binding
+                    or state.get("transport") != transport or state.get("app_server") != app_server):
                 return {"ok": False, "job_id": job_id, "status": "unknown", "error": "idempotency_conflict",
                         "idempotency_conflict": True}
             try:
@@ -279,6 +309,8 @@ def job_start(command: str | list[str], cwd: str | None = None, env: dict[str, s
                         dispatcher_request_fingerprint=request_fingerprint, dispatcher_binding=dispatcher_binding,
                         explicit_env_digest=explicit_env_digest,
                         launch_fence_state="pending")
+    if transport is not None:
+        metadata.update(transport=transport, app_server=app_server)
     try:
         from .git_qa import git_status
         metadata["git_at_start"] = git_status(working)
@@ -306,7 +338,7 @@ def job_start(command: str | list[str], cwd: str | None = None, env: dict[str, s
         else:
             metadata.update(status="failed", error=str(exc), finished_at=time.time())
         _save(directory / "metadata.json", metadata)
-        return metadata
+        return _public_job_result(metadata)
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         state = _read(directory / "metadata.json")
@@ -315,9 +347,25 @@ def job_start(command: str | list[str], cwd: str | None = None, env: dict[str, s
         if worker is not None and worker.poll() is not None:
             state.update(status="failed", error="Job worker exited during startup; inspect worker.log", finished_at=time.time())
             _save(directory / "metadata.json", state)
-            return state
+            return _public_job_result(state)
         time.sleep(.05)
-    return {**state, "startup_pending": True}
+    return _public_job_result({**state, "startup_pending": True})
+
+
+def _public_job_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Keep prompts and native app-server transport evidence private on disk."""
+    if result.get("transport") != APP_SERVER_TRANSPORT:
+        return result
+    public = dict(result)
+    runtime = public.pop("app_server_runtime", {})
+    if isinstance(runtime, dict):
+        public["current_turn_id"] = runtime.get("current_turn_id")
+    spec = public.get("app_server")
+    if isinstance(spec, dict):
+        public["app_server"] = {key: value for key, value in spec.items() if key != "input_text"}
+    for key in ("journal_path", "steer_evidence", "steering", "native_thread_id", "native_turn_id", "connection_id", "rpc_id"):
+        public.pop(key, None)
+    return public
 
 
 def job_status(job_id: str, runtime_dir: str | None = None) -> dict[str, Any]:
@@ -342,14 +390,17 @@ def job_status(job_id: str, runtime_dir: str | None = None) -> dict[str, Any]:
         if finalized["status"] not in ACTIVE:
             result.update(finalized)
     if result["status"] in ACTIVE:
-        if result["process_identity"] == "pid_reused":
+        if (result.get("transport") == APP_SERVER_TRANSPORT and result["worker_identity"] in {"missing", "pid_reused"}
+                and result["process_identity"] == "alive"):
+            result.update(status="unknown", error_code="control_lost", error="The app-server supervisor is unavailable")
+        elif result["process_identity"] == "pid_reused":
             result.update(status="lost", error="PID was reused; the unrelated process will not be signalled")
         elif result["worker_identity"] in {"missing", "pid_reused"} and result["process_identity"] == "missing":
             if result["status"] != "starting" or time.time() - result["started_at"] > 15:
                 result.update(status="lost", error="Worker and job are gone; exit code cannot be recovered")
         elif result["process_identity"] == "access_denied":
             result.update(status="unknown", error="Access denied when verifying process identity")
-    return _progress_metadata(result)
+    return _public_job_result(_progress_metadata(result))
 
 
 def job_tail(job_id: str, max_bytes: int = 20000, runtime_dir: str | None = None) -> dict[str, Any]:
@@ -390,7 +441,25 @@ def job_stop(job_id: str, force: bool = True, timeout_sec: float = 10, runtime_d
     """Stop a job and its descendants after identity verification; default force=True. Keeps metadata/logs."""
     if timeout_sec < 0:
         raise ValueError("timeout_sec must be nonnegative")
+    deadline = time.monotonic() + timeout_sec
     result = job_status(job_id, runtime_dir)
+    if result.get("transport") == APP_SERVER_TRANSPORT:
+        # A lost supervisor still leaves an exact child identity that can be
+        # safely terminated. Never treat an unknown status as proof of exit.
+        if result["status"] not in ACTIVE and result.get("error_code") != "control_lost":
+            return result
+        directory = _directory(job_id, runtime_dir)
+        interrupt_deadline = max(time.monotonic(), deadline - 2.0)
+        if result.get("worker_identity") == "alive":
+            _save(directory / "stop.json", {"force": force, "deadline_monotonic": deadline,
+                                             "interrupt_deadline_monotonic": interrupt_deadline})
+            result = job_wait(job_id, max(0.0, interrupt_deadline - time.monotonic()), runtime_dir)
+            if result["status"] not in ACTIVE and result.get("error_code") != "control_lost":
+                return result
+        if identity(result.get("pid"), result.get("process_create_time")) == "alive":
+            result["stop_result"] = _terminate_tree(result["pid"], result["process_create_time"], force,
+                                                     deadline_monotonic=deadline)
+        return result
     if result["status"] not in ACTIVE:
         return result
     directory = _directory(job_id, runtime_dir)
@@ -407,6 +476,116 @@ def job_stop(job_id: str, force: bool = True, timeout_sec: float = 10, runtime_d
     return result
 
 
+def _steer_metadata(job_id: str, *, require_running: bool) -> tuple[Path, dict[str, Any]]:
+    """Read only the configured runtime and verify the exact dispatcher job."""
+    if not isinstance(job_id, str):
+        raise ValueError("invalid_job_id")
+    canonical_id = str(uuid.UUID(job_id))
+    if canonical_id != job_id:
+        raise ValueError("invalid_job_id")
+    directory = _directory(canonical_id)
+    metadata = _read(directory / "metadata.json")
+    if not isinstance(metadata, dict) or metadata.get("job_id") != canonical_id:
+        raise ValueError("steer_identity_mismatch")
+    if metadata.get("transport") != APP_SERVER_TRANSPORT:
+        raise ValueError("steer_unsupported")
+    binding = metadata.get("dispatcher_binding")
+    if (not _dispatcher_binding_valid(binding) or binding["gateway_job_id"] != canonical_id
+            or type(metadata.get("worker_pid")) is not int or metadata["worker_pid"] <= 0
+            or type(metadata.get("worker_create_time")) not in (int, float)
+            or not math.isfinite(metadata["worker_create_time"])
+            or metadata["worker_create_time"] <= 0):
+        raise ValueError("steer_identity_mismatch")
+    runtime = metadata.get("app_server_runtime") or {}
+    if not isinstance(runtime, dict):
+        raise ValueError("steer_identity_mismatch")
+    if require_running and (metadata.get("status") != "running" or not runtime.get("current_turn_id")):
+        raise ValueError("no_active_turn")
+    from .work_dispatcher_codex import steer_guard
+    guard = steer_guard(binding, metadata, require_running=require_running)
+    if guard != "open":
+        raise ValueError({"closed": "steer_guard_closed", "mismatch": "steer_identity_mismatch"}.get(guard, "steer_guard_unavailable"))
+    if require_running:
+        if identity(metadata.get("worker_pid"), metadata.get("worker_create_time")) != "alive":
+            raise ValueError("steer_control_lost")
+        if identity(metadata.get("pid"), metadata.get("process_create_time")) != "alive":
+            raise ValueError("steer_control_lost")
+    return directory, metadata
+
+
+def _steer_receipt(directory: Path, metadata: dict[str, Any], request: dict[str, Any] | None) -> dict[str, Any]:
+    from . import job_steering as mailbox
+    runtime = metadata.get("app_server_runtime") or {}
+    state = mailbox.read_state(directory, request["request_id"]) if request else None
+    return mailbox.public_receipt(request, state, closed=mailbox.mailbox_closed(directory),
+                                  worker_alive=identity(metadata.get("worker_pid"), metadata.get("worker_create_time")) == "alive",
+                                  connection_id=runtime.get("connection_id"),
+                                  connection_alive=(runtime.get("connection_state") == "connected" and
+                                                    identity(metadata.get("pid"), metadata.get("process_create_time")) == "alive"))
+
+
+def job_steer(job_id: str, expected_turn_id: str, text: str, idempotency_key: str) -> dict[str, Any]:
+    """Queue one immutable steer for this exact active turn; returns a bounded durable receipt."""
+    from . import job_steering as mailbox
+    try:
+        request = mailbox.make_request(job_id, expected_turn_id, text, idempotency_key)
+        directory, metadata = _steer_metadata(job_id, require_running=False)
+        with mailbox.admission_lock(directory):
+            previous = mailbox.read_request(directory, request["request_id"])
+            if previous is not None:
+                if previous["request_digest"] != request["request_digest"]:
+                    return {"ok": False, "error": "idempotency_conflict"}
+                return _steer_receipt(directory, metadata, previous)
+            directory, metadata = _steer_metadata(job_id, require_running=True)
+            if mailbox.mailbox_closed(directory):
+                return {"ok": False, "error": "steer_mailbox_closed"}
+            runtime = metadata.get("app_server_runtime") or {}
+            if not runtime.get("current_turn_id"):
+                return {"ok": False, "error": "no_active_turn"}
+            if runtime["current_turn_id"] != expected_turn_id:
+                return {"ok": False, "error": "stale_turn"}
+            if runtime.get("connection_state") != "connected" or not runtime.get("connection_id"):
+                return {"ok": False, "error": "steer_control_lost"}
+            if mailbox.pending_count(directory) >= mailbox.MAX_PENDING:
+                return {"ok": False, "error": "steer_pending_limit"}
+            if not mailbox.publish_json(mailbox.request_path(directory, request["request_id"]), request):
+                previous = mailbox.read_request(directory, request["request_id"])
+                if previous is None or previous["request_digest"] != request["request_digest"]:
+                    return {"ok": False, "error": "idempotency_conflict"}
+                request = previous
+        # Fence and exact worker identity are re-read after publication. The
+        # gateway never invents or writes a worker delivery state in this race.
+        _, metadata = _steer_metadata(job_id, require_running=False)
+        return _steer_receipt(directory, metadata, request)
+    except (ValueError, UnicodeError) as exc:
+        reason = str(exc)
+        allowed = {"invalid_job_id", "invalid_idempotency_key", "invalid_expected_turn_id", "invalid_steer_text",
+                   "steer_unsupported", "steer_identity_mismatch", "steer_guard_closed", "steer_guard_unavailable",
+                   "steer_control_lost", "no_active_turn"}
+        return {"ok": False, "error": reason if reason in allowed else "invalid_steer_request"}
+    except TimeoutError:
+        return {"ok": False, "error": "steer_mailbox_busy"}
+    except (FileNotFoundError, PermissionError, OSError, TypeError, KeyError):
+        return {"ok": False, "error": "steer_unavailable"}
+
+
+def job_steer_status(job_id: str, idempotency_key: str) -> dict[str, Any]:
+    """Read a steer receipt without exposing text or native transport handles."""
+    from . import job_steering as mailbox
+    try:
+        request_id = mailbox.validate_key(idempotency_key)
+        directory, metadata = _steer_metadata(job_id, require_running=False)
+        request = mailbox.read_request(directory, request_id)
+        return _steer_receipt(directory, metadata, request)
+    except (ValueError, UnicodeError) as exc:
+        reason = str(exc)
+        allowed = {"invalid_job_id", "invalid_idempotency_key", "steer_unsupported", "steer_identity_mismatch",
+                   "steer_guard_closed", "steer_guard_unavailable"}
+        return {"ok": False, "error": reason if reason in allowed else "invalid_steer_receipt"}
+    except (FileNotFoundError, PermissionError, OSError, TypeError, KeyError):
+        return {"ok": False, "error": "steer_unavailable"}
+
+
 def job_list(runtime_dir: str | None = None, active_only: bool = False) -> dict[str, Any]:
     """Discover jobs from disk, including jobs started by previous Gateway instances."""
     items, errors = [], []
@@ -420,4 +599,4 @@ def job_list(runtime_dir: str | None = None, active_only: bool = False) -> dict[
     return {"jobs": sorted(items, key=lambda item: item["started_at"], reverse=True), "errors": errors}
 
 
-TOOLS = [job_start, job_status, job_tail, job_wait, job_stop, job_list]
+TOOLS = [job_start, job_status, job_tail, job_wait, job_stop, job_list, job_steer, job_steer_status]

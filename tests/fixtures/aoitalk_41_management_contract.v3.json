@@ -1,0 +1,3616 @@
+{
+  "freeze": {
+    "docs": "confirmed_current_worktree",
+    "knowledge": "confirmed_current_worktree",
+    "tasks": "confirmed_current_worktree",
+    "tasks_reason": "Task operation strict DTOs plus list/read query parsing and SQL-bounded projections were checked against current 41 source at the recorded commit and hashes.",
+    "task_operation_dto": "confirmed_current_worktree",
+    "task_read": "confirmed_current_worktree",
+    "task_list": "confirmed_current_worktree"
+  },
+  "models": {
+    "DocsChangesetPayload": {
+      "$defs": {
+        "DocsAddTagOperation": {
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "add_tag",
+              "title": "Op",
+              "type": "string"
+            },
+            "node_id": {
+              "title": "Node Id",
+              "type": "string"
+            },
+            "tag_id": {
+              "title": "Tag Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "node_id",
+            "tag_id"
+          ],
+          "title": "DocsAddTagOperation",
+          "type": "object"
+        },
+        "DocsArchiveOperation": {
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "archive",
+              "title": "Op",
+              "type": "string"
+            },
+            "node_id": {
+              "title": "Node Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "node_id"
+          ],
+          "title": "DocsArchiveOperation",
+          "type": "object"
+        },
+        "DocsCreateOperation": {
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "create",
+              "title": "Op",
+              "type": "string"
+            },
+            "ref": {
+              "title": "Ref",
+              "type": "string"
+            },
+            "parent_id": {
+              "title": "Parent Id",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "description": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Description"
+            },
+            "content": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Content"
+            },
+            "block_type": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "paragraph",
+                    "markdown",
+                    "code"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Block Type"
+            }
+          },
+          "required": [
+            "op",
+            "ref",
+            "parent_id",
+            "title"
+          ],
+          "title": "DocsCreateOperation",
+          "type": "object"
+        },
+        "DocsMoveOperation": {
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "move",
+              "title": "Op",
+              "type": "string"
+            },
+            "node_id": {
+              "title": "Node Id",
+              "type": "string"
+            },
+            "parent_id": {
+              "title": "Parent Id",
+              "type": "string"
+            },
+            "leave_reference": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Leave Reference"
+            }
+          },
+          "required": [
+            "op",
+            "node_id",
+            "parent_id"
+          ],
+          "title": "DocsMoveOperation",
+          "type": "object"
+        },
+        "DocsRemoveTagOperation": {
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "remove_tag",
+              "title": "Op",
+              "type": "string"
+            },
+            "node_id": {
+              "title": "Node Id",
+              "type": "string"
+            },
+            "tag_id": {
+              "title": "Tag Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "node_id",
+            "tag_id"
+          ],
+          "title": "DocsRemoveTagOperation",
+          "type": "object"
+        },
+        "DocsSetFieldsOperation": {
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "set_fields",
+              "title": "Op",
+              "type": "string"
+            },
+            "node_id": {
+              "title": "Node Id",
+              "type": "string"
+            },
+            "values": {
+              "additionalProperties": true,
+              "title": "Values",
+              "type": "object"
+            }
+          },
+          "required": [
+            "op",
+            "node_id",
+            "values"
+          ],
+          "title": "DocsSetFieldsOperation",
+          "type": "object"
+        },
+        "DocsUpdateOperation": {
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "update",
+              "title": "Op",
+              "type": "string"
+            },
+            "node_id": {
+              "title": "Node Id",
+              "type": "string"
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Title"
+            },
+            "description": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Description"
+            },
+            "content": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Content"
+            }
+          },
+          "required": [
+            "op",
+            "node_id"
+          ],
+          "title": "DocsUpdateOperation",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "intent": {
+          "enum": [
+            "revise_section",
+            "upsert_record",
+            "reorganize_subtree"
+          ],
+          "title": "Intent",
+          "type": "string"
+        },
+        "operations": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "add_tag": "#/$defs/DocsAddTagOperation",
+                "archive": "#/$defs/DocsArchiveOperation",
+                "create": "#/$defs/DocsCreateOperation",
+                "move": "#/$defs/DocsMoveOperation",
+                "remove_tag": "#/$defs/DocsRemoveTagOperation",
+                "set_fields": "#/$defs/DocsSetFieldsOperation",
+                "update": "#/$defs/DocsUpdateOperation"
+              },
+              "propertyName": "op"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/DocsUpdateOperation"
+              },
+              {
+                "$ref": "#/$defs/DocsCreateOperation"
+              },
+              {
+                "$ref": "#/$defs/DocsSetFieldsOperation"
+              },
+              {
+                "$ref": "#/$defs/DocsAddTagOperation"
+              },
+              {
+                "$ref": "#/$defs/DocsRemoveTagOperation"
+              },
+              {
+                "$ref": "#/$defs/DocsMoveOperation"
+              },
+              {
+                "$ref": "#/$defs/DocsArchiveOperation"
+              }
+            ]
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "title": "Operations",
+          "type": "array"
+        }
+      },
+      "required": [
+        "intent",
+        "operations"
+      ],
+      "title": "DocsChangesetPayload",
+      "type": "object"
+    },
+    "DocsProtocolChangesetRequest": {
+      "$defs": {
+        "DocsAddTagOperation": {
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "add_tag",
+              "title": "Op",
+              "type": "string"
+            },
+            "node_id": {
+              "title": "Node Id",
+              "type": "string"
+            },
+            "tag_id": {
+              "title": "Tag Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "node_id",
+            "tag_id"
+          ],
+          "title": "DocsAddTagOperation",
+          "type": "object"
+        },
+        "DocsArchiveOperation": {
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "archive",
+              "title": "Op",
+              "type": "string"
+            },
+            "node_id": {
+              "title": "Node Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "node_id"
+          ],
+          "title": "DocsArchiveOperation",
+          "type": "object"
+        },
+        "DocsChangesetPayload": {
+          "additionalProperties": false,
+          "properties": {
+            "intent": {
+              "enum": [
+                "revise_section",
+                "upsert_record",
+                "reorganize_subtree"
+              ],
+              "title": "Intent",
+              "type": "string"
+            },
+            "operations": {
+              "items": {
+                "discriminator": {
+                  "mapping": {
+                    "add_tag": "#/$defs/DocsAddTagOperation",
+                    "archive": "#/$defs/DocsArchiveOperation",
+                    "create": "#/$defs/DocsCreateOperation",
+                    "move": "#/$defs/DocsMoveOperation",
+                    "remove_tag": "#/$defs/DocsRemoveTagOperation",
+                    "set_fields": "#/$defs/DocsSetFieldsOperation",
+                    "update": "#/$defs/DocsUpdateOperation"
+                  },
+                  "propertyName": "op"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/DocsUpdateOperation"
+                  },
+                  {
+                    "$ref": "#/$defs/DocsCreateOperation"
+                  },
+                  {
+                    "$ref": "#/$defs/DocsSetFieldsOperation"
+                  },
+                  {
+                    "$ref": "#/$defs/DocsAddTagOperation"
+                  },
+                  {
+                    "$ref": "#/$defs/DocsRemoveTagOperation"
+                  },
+                  {
+                    "$ref": "#/$defs/DocsMoveOperation"
+                  },
+                  {
+                    "$ref": "#/$defs/DocsArchiveOperation"
+                  }
+                ]
+              },
+              "maxItems": 100,
+              "minItems": 1,
+              "title": "Operations",
+              "type": "array"
+            }
+          },
+          "required": [
+            "intent",
+            "operations"
+          ],
+          "title": "DocsChangesetPayload",
+          "type": "object"
+        },
+        "DocsCreateOperation": {
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "create",
+              "title": "Op",
+              "type": "string"
+            },
+            "ref": {
+              "title": "Ref",
+              "type": "string"
+            },
+            "parent_id": {
+              "title": "Parent Id",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "description": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Description"
+            },
+            "content": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Content"
+            },
+            "block_type": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "paragraph",
+                    "markdown",
+                    "code"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Block Type"
+            }
+          },
+          "required": [
+            "op",
+            "ref",
+            "parent_id",
+            "title"
+          ],
+          "title": "DocsCreateOperation",
+          "type": "object"
+        },
+        "DocsMoveOperation": {
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "move",
+              "title": "Op",
+              "type": "string"
+            },
+            "node_id": {
+              "title": "Node Id",
+              "type": "string"
+            },
+            "parent_id": {
+              "title": "Parent Id",
+              "type": "string"
+            },
+            "leave_reference": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Leave Reference"
+            }
+          },
+          "required": [
+            "op",
+            "node_id",
+            "parent_id"
+          ],
+          "title": "DocsMoveOperation",
+          "type": "object"
+        },
+        "DocsRemoveTagOperation": {
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "remove_tag",
+              "title": "Op",
+              "type": "string"
+            },
+            "node_id": {
+              "title": "Node Id",
+              "type": "string"
+            },
+            "tag_id": {
+              "title": "Tag Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "node_id",
+            "tag_id"
+          ],
+          "title": "DocsRemoveTagOperation",
+          "type": "object"
+        },
+        "DocsSetFieldsOperation": {
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "set_fields",
+              "title": "Op",
+              "type": "string"
+            },
+            "node_id": {
+              "title": "Node Id",
+              "type": "string"
+            },
+            "values": {
+              "additionalProperties": true,
+              "title": "Values",
+              "type": "object"
+            }
+          },
+          "required": [
+            "op",
+            "node_id",
+            "values"
+          ],
+          "title": "DocsSetFieldsOperation",
+          "type": "object"
+        },
+        "DocsUpdateOperation": {
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "update",
+              "title": "Op",
+              "type": "string"
+            },
+            "node_id": {
+              "title": "Node Id",
+              "type": "string"
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Title"
+            },
+            "description": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Description"
+            },
+            "content": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Content"
+            }
+          },
+          "required": [
+            "op",
+            "node_id"
+          ],
+          "title": "DocsUpdateOperation",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "root_id": {
+          "format": "uuid",
+          "title": "Root Id",
+          "type": "string"
+        },
+        "project_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project Id"
+        },
+        "write_token": {
+          "format": "uuid",
+          "title": "Write Token",
+          "type": "string"
+        },
+        "operation_id": {
+          "format": "uuid",
+          "title": "Operation Id",
+          "type": "string"
+        },
+        "changeset": {
+          "$ref": "#/$defs/DocsChangesetPayload"
+        }
+      },
+      "required": [
+        "root_id",
+        "write_token",
+        "operation_id",
+        "changeset"
+      ],
+      "title": "DocsProtocolChangesetRequest",
+      "type": "object"
+    },
+    "DocsProtocolEditReadRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "root_id": {
+          "format": "uuid",
+          "title": "Root Id",
+          "type": "string"
+        },
+        "project_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project Id"
+        },
+        "cursor": {
+          "default": "",
+          "maxLength": 128,
+          "title": "Cursor",
+          "type": "string"
+        },
+        "depth": {
+          "default": 8,
+          "maximum": 32,
+          "minimum": 0,
+          "title": "Depth",
+          "type": "integer"
+        },
+        "page_chars": {
+          "default": 12000,
+          "maximum": 32000,
+          "minimum": 4096,
+          "title": "Page Chars",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "root_id"
+      ],
+      "title": "DocsProtocolEditReadRequest",
+      "type": "object"
+    },
+    "DocsProtocolReadRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "root_id": {
+          "format": "uuid",
+          "title": "Root Id",
+          "type": "string"
+        },
+        "project_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project Id"
+        },
+        "view": {
+          "default": "document",
+          "enum": [
+            "document",
+            "record",
+            "outline"
+          ],
+          "title": "View",
+          "type": "string"
+        },
+        "cursor": {
+          "default": "",
+          "maxLength": 512,
+          "title": "Cursor",
+          "type": "string"
+        },
+        "depth": {
+          "default": 8,
+          "maximum": 32,
+          "minimum": 0,
+          "title": "Depth",
+          "type": "integer"
+        },
+        "page_chars": {
+          "default": 12000,
+          "maximum": 32000,
+          "minimum": 4096,
+          "title": "Page Chars",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "root_id"
+      ],
+      "title": "DocsProtocolReadRequest",
+      "type": "object"
+    },
+    "KnowledgePluginSearchPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "default": "",
+          "maxLength": 2000,
+          "title": "Query",
+          "type": "string"
+        },
+        "source_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Id"
+        },
+        "project_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project Id"
+        },
+        "tags": {
+          "items": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Tags",
+          "type": "array"
+        },
+        "extension": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Extension"
+        },
+        "path_prefix": {
+          "anyOf": [
+            {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path Prefix"
+        },
+        "limit": {
+          "default": 10,
+          "maximum": 50,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "title": "KnowledgePluginSearchPayload",
+      "type": "object"
+    },
+    "CreateTaskPayload": {
+      "properties": {
+        "project_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project Id"
+        },
+        "knowledge_node_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Knowledge Node Id"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "status": {
+          "default": "todo",
+          "title": "Status",
+          "type": "string"
+        },
+        "priority": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Priority"
+        },
+        "start_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start At"
+        },
+        "end_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "End At"
+        },
+        "all_day": {
+          "default": false,
+          "title": "All Day",
+          "type": "boolean"
+        },
+        "auto_close_on_due": {
+          "default": false,
+          "title": "Auto Close On Due",
+          "type": "boolean"
+        },
+        "reminder_offsets": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reminder Offsets"
+        },
+        "notifications_enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Notifications Enabled"
+        },
+        "estimated_hours": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Estimated Hours"
+        },
+        "parent_task_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Task Id"
+        },
+        "source": {
+          "default": "local",
+          "title": "Source",
+          "type": "string"
+        },
+        "assignee_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Assignee Ids",
+          "type": "array"
+        },
+        "tag_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Tag Ids",
+          "type": "array"
+        },
+        "recurrence_rrule": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recurrence Rrule"
+        },
+        "recurrence_timezone": {
+          "default": "Asia/Tokyo",
+          "title": "Recurrence Timezone",
+          "type": "string"
+        },
+        "task_metadata": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Task Metadata"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "title": "CreateTaskPayload",
+      "type": "object"
+    },
+    "UpdateTaskPayload": {
+      "properties": {
+        "project_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project Id"
+        },
+        "knowledge_node_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Knowledge Node Id"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        },
+        "priority": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Priority"
+        },
+        "start_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start At"
+        },
+        "end_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "End At"
+        },
+        "all_day": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "All Day"
+        },
+        "auto_close_on_due": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Auto Close On Due"
+        },
+        "reminder_offsets": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reminder Offsets"
+        },
+        "notifications_enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Notifications Enabled"
+        },
+        "estimated_hours": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Estimated Hours"
+        },
+        "parent_task_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Task Id"
+        },
+        "assignee_ids": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Assignee Ids"
+        },
+        "tag_ids": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tag Ids"
+        },
+        "recurrence_rrule": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recurrence Rrule"
+        },
+        "recurrence_timezone": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recurrence Timezone"
+        },
+        "task_metadata": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Task Metadata"
+        },
+        "close_incomplete_subtasks": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Close Incomplete Subtasks"
+        }
+      },
+      "title": "UpdateTaskPayload",
+      "type": "object"
+    },
+    "TaskOperationRequest": {
+      "$defs": {
+        "_CreateOperation": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "const": "create",
+              "title": "Action",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/_StrictCreateTaskPayload"
+            }
+          },
+          "required": [
+            "action",
+            "payload"
+          ],
+          "title": "_CreateOperation",
+          "type": "object"
+        },
+        "_DeleteOperation": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "const": "delete",
+              "title": "Action",
+              "type": "string"
+            },
+            "task_id": {
+              "title": "Task Id",
+              "type": "string"
+            },
+            "expected_updated_at": {
+              "title": "Expected Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "task_id",
+            "expected_updated_at"
+          ],
+          "title": "_DeleteOperation",
+          "type": "object"
+        },
+        "_RestoreOperation": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "const": "restore",
+              "title": "Action",
+              "type": "string"
+            },
+            "task_id": {
+              "title": "Task Id",
+              "type": "string"
+            },
+            "deletion_batch_id": {
+              "title": "Deletion Batch Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "task_id",
+            "deletion_batch_id"
+          ],
+          "title": "_RestoreOperation",
+          "type": "object"
+        },
+        "_StrictCreateTaskPayload": {
+          "additionalProperties": false,
+          "properties": {
+            "project_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Project Id"
+            },
+            "knowledge_node_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Knowledge Node Id"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "description": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Description"
+            },
+            "status": {
+              "default": "todo",
+              "title": "Status",
+              "type": "string"
+            },
+            "priority": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Priority"
+            },
+            "start_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Start At"
+            },
+            "end_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "End At"
+            },
+            "all_day": {
+              "default": false,
+              "title": "All Day",
+              "type": "boolean"
+            },
+            "auto_close_on_due": {
+              "default": false,
+              "title": "Auto Close On Due",
+              "type": "boolean"
+            },
+            "reminder_offsets": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "integer"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reminder Offsets"
+            },
+            "notifications_enabled": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Notifications Enabled"
+            },
+            "estimated_hours": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Estimated Hours"
+            },
+            "parent_task_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Parent Task Id"
+            },
+            "source": {
+              "default": "local",
+              "title": "Source",
+              "type": "string"
+            },
+            "assignee_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Assignee Ids",
+              "type": "array"
+            },
+            "tag_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Tag Ids",
+              "type": "array"
+            },
+            "recurrence_rrule": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Recurrence Rrule"
+            },
+            "recurrence_timezone": {
+              "default": "Asia/Tokyo",
+              "title": "Recurrence Timezone",
+              "type": "string"
+            },
+            "task_metadata": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Task Metadata"
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "title": "_StrictCreateTaskPayload",
+          "type": "object"
+        },
+        "_StrictUpdateTaskPayload": {
+          "additionalProperties": false,
+          "properties": {
+            "project_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Project Id"
+            },
+            "knowledge_node_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Knowledge Node Id"
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Title"
+            },
+            "description": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Description"
+            },
+            "status": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Status"
+            },
+            "priority": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Priority"
+            },
+            "start_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Start At"
+            },
+            "end_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "End At"
+            },
+            "all_day": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "All Day"
+            },
+            "auto_close_on_due": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Auto Close On Due"
+            },
+            "reminder_offsets": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "integer"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reminder Offsets"
+            },
+            "notifications_enabled": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Notifications Enabled"
+            },
+            "estimated_hours": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Estimated Hours"
+            },
+            "parent_task_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Parent Task Id"
+            },
+            "assignee_ids": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Assignee Ids"
+            },
+            "tag_ids": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Tag Ids"
+            },
+            "recurrence_rrule": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Recurrence Rrule"
+            },
+            "recurrence_timezone": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Recurrence Timezone"
+            },
+            "task_metadata": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Task Metadata"
+            },
+            "close_incomplete_subtasks": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Close Incomplete Subtasks"
+            }
+          },
+          "title": "_StrictUpdateTaskPayload",
+          "type": "object"
+        },
+        "_UpdateOperation": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "const": "update",
+              "title": "Action",
+              "type": "string"
+            },
+            "task_id": {
+              "title": "Task Id",
+              "type": "string"
+            },
+            "expected_updated_at": {
+              "title": "Expected Updated At",
+              "type": "string"
+            },
+            "changes": {
+              "$ref": "#/$defs/_StrictUpdateTaskPayload"
+            }
+          },
+          "required": [
+            "action",
+            "task_id",
+            "expected_updated_at",
+            "changes"
+          ],
+          "title": "_UpdateOperation",
+          "type": "object"
+        }
+      },
+      "discriminator": {
+        "mapping": {
+          "create": "#/$defs/_CreateOperation",
+          "delete": "#/$defs/_DeleteOperation",
+          "restore": "#/$defs/_RestoreOperation",
+          "update": "#/$defs/_UpdateOperation"
+        },
+        "propertyName": "action"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/_CreateOperation"
+        },
+        {
+          "$ref": "#/$defs/_UpdateOperation"
+        },
+        {
+          "$ref": "#/$defs/_DeleteOperation"
+        },
+        {
+          "$ref": "#/$defs/_RestoreOperation"
+        }
+      ]
+    }
+  },
+  "openapi_paths": {
+    "/api/docs/changesets": {
+      "post": {
+        "tags": [
+          "docs"
+        ],
+        "summary": "Apply Protocol Changeset",
+        "operationId": "apply_protocol_changeset_api_docs_changesets_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DocsProtocolChangesetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/docs/edit-reads": {
+      "post": {
+        "tags": [
+          "docs"
+        ],
+        "summary": "Read Protocol Edit Page",
+        "operationId": "read_protocol_edit_page_api_docs_edit_reads_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DocsProtocolEditReadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/docs/reads": {
+      "post": {
+        "tags": [
+          "docs"
+        ],
+        "summary": "Read Protocol Page",
+        "operationId": "read_protocol_page_api_docs_reads_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DocsProtocolReadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/knowledge/plugin/documents/{document_id}": {
+      "get": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "Read Plugin Document",
+        "operationId": "read_plugin_document_api_knowledge_plugin_documents__document_id__get",
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Document Id"
+            }
+          },
+          {
+            "name": "view",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^(body|outline)$",
+              "default": "body",
+              "title": "View"
+            }
+          },
+          {
+            "name": "max_chars",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 32000,
+              "minimum": 1,
+              "default": 16000,
+              "title": "Max Chars"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "fingerprint",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 64,
+                  "maxLength": 64,
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Fingerprint"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/knowledge/plugin/search": {
+      "post": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "Search Plugin Sources",
+        "operationId": "search_plugin_sources_api_knowledge_plugin_search_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KnowledgePluginSearchPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/knowledge/plugin/sources": {
+      "get": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "List Plugin Sources",
+        "operationId": "list_plugin_sources_api_knowledge_plugin_sources_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tasks": {
+      "get": {
+        "tags": [
+          "tasks"
+        ],
+        "summary": "List Tasks",
+        "operationId": "list_tasks_api_tasks_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "tasks"
+        ],
+        "summary": "Create Task",
+        "operationId": "create_task_api_tasks_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTaskPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tasks/operations/{operation_id}": {
+      "put": {
+        "tags": [
+          "tasks"
+        ],
+        "summary": "Submit Task Operation",
+        "operationId": "submit_task_operation_api_tasks_operations__operation_id__put",
+        "parameters": [
+          {
+            "name": "operation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Operation Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "discriminator": {
+                  "propertyName": "action"
+                },
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "action": {
+                        "const": "create",
+                        "title": "Action",
+                        "type": "string"
+                      },
+                      "payload": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "project_id": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Project Id"
+                          },
+                          "knowledge_node_id": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Knowledge Node Id"
+                          },
+                          "title": {
+                            "title": "Title",
+                            "type": "string"
+                          },
+                          "description": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Description"
+                          },
+                          "status": {
+                            "default": "todo",
+                            "title": "Status",
+                            "type": "string"
+                          },
+                          "priority": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Priority"
+                          },
+                          "start_at": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Start At"
+                          },
+                          "end_at": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "End At"
+                          },
+                          "all_day": {
+                            "default": false,
+                            "title": "All Day",
+                            "type": "boolean"
+                          },
+                          "auto_close_on_due": {
+                            "default": false,
+                            "title": "Auto Close On Due",
+                            "type": "boolean"
+                          },
+                          "reminder_offsets": {
+                            "anyOf": [
+                              {
+                                "items": {
+                                  "type": "integer"
+                                },
+                                "type": "array"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Reminder Offsets"
+                          },
+                          "notifications_enabled": {
+                            "anyOf": [
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Notifications Enabled"
+                          },
+                          "estimated_hours": {
+                            "anyOf": [
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Estimated Hours"
+                          },
+                          "parent_task_id": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Parent Task Id"
+                          },
+                          "source": {
+                            "default": "local",
+                            "title": "Source",
+                            "type": "string"
+                          },
+                          "assignee_ids": {
+                            "items": {
+                              "type": "string"
+                            },
+                            "title": "Assignee Ids",
+                            "type": "array"
+                          },
+                          "tag_ids": {
+                            "items": {
+                              "type": "string"
+                            },
+                            "title": "Tag Ids",
+                            "type": "array"
+                          },
+                          "recurrence_rrule": {
+                            "anyOf": [
+                              {
+                                "maxLength": 2048,
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Recurrence Rrule"
+                          },
+                          "recurrence_timezone": {
+                            "default": "Asia/Tokyo",
+                            "title": "Recurrence Timezone",
+                            "type": "string"
+                          },
+                          "task_metadata": {
+                            "anyOf": [
+                              {
+                                "additionalProperties": true,
+                                "type": "object"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Task Metadata"
+                          }
+                        },
+                        "required": [
+                          "title"
+                        ],
+                        "title": "_StrictCreateTaskPayload",
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "payload"
+                    ],
+                    "title": "_CreateOperation",
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "action": {
+                        "const": "update",
+                        "title": "Action",
+                        "type": "string"
+                      },
+                      "task_id": {
+                        "title": "Task Id",
+                        "type": "string"
+                      },
+                      "expected_updated_at": {
+                        "title": "Expected Updated At",
+                        "type": "string"
+                      },
+                      "changes": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "project_id": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Project Id"
+                          },
+                          "knowledge_node_id": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Knowledge Node Id"
+                          },
+                          "title": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Title"
+                          },
+                          "description": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Description"
+                          },
+                          "status": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Status"
+                          },
+                          "priority": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Priority"
+                          },
+                          "start_at": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Start At"
+                          },
+                          "end_at": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "End At"
+                          },
+                          "all_day": {
+                            "anyOf": [
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "All Day"
+                          },
+                          "auto_close_on_due": {
+                            "anyOf": [
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Auto Close On Due"
+                          },
+                          "reminder_offsets": {
+                            "anyOf": [
+                              {
+                                "items": {
+                                  "type": "integer"
+                                },
+                                "type": "array"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Reminder Offsets"
+                          },
+                          "notifications_enabled": {
+                            "anyOf": [
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Notifications Enabled"
+                          },
+                          "estimated_hours": {
+                            "anyOf": [
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Estimated Hours"
+                          },
+                          "parent_task_id": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Parent Task Id"
+                          },
+                          "assignee_ids": {
+                            "anyOf": [
+                              {
+                                "items": {
+                                  "type": "string"
+                                },
+                                "type": "array"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Assignee Ids"
+                          },
+                          "tag_ids": {
+                            "anyOf": [
+                              {
+                                "items": {
+                                  "type": "string"
+                                },
+                                "type": "array"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Tag Ids"
+                          },
+                          "recurrence_rrule": {
+                            "anyOf": [
+                              {
+                                "maxLength": 2048,
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Recurrence Rrule"
+                          },
+                          "recurrence_timezone": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Recurrence Timezone"
+                          },
+                          "task_metadata": {
+                            "anyOf": [
+                              {
+                                "additionalProperties": true,
+                                "type": "object"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Task Metadata"
+                          },
+                          "close_incomplete_subtasks": {
+                            "anyOf": [
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Close Incomplete Subtasks"
+                          }
+                        },
+                        "title": "_StrictUpdateTaskPayload",
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "task_id",
+                      "expected_updated_at",
+                      "changes"
+                    ],
+                    "title": "_UpdateOperation",
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "action": {
+                        "const": "delete",
+                        "title": "Action",
+                        "type": "string"
+                      },
+                      "task_id": {
+                        "title": "Task Id",
+                        "type": "string"
+                      },
+                      "expected_updated_at": {
+                        "title": "Expected Updated At",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "task_id",
+                      "expected_updated_at"
+                    ],
+                    "title": "_DeleteOperation",
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "action": {
+                        "const": "restore",
+                        "title": "Action",
+                        "type": "string"
+                      },
+                      "task_id": {
+                        "title": "Task Id",
+                        "type": "string"
+                      },
+                      "deletion_batch_id": {
+                        "title": "Deletion Batch Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "task_id",
+                      "deletion_batch_id"
+                    ],
+                    "title": "_RestoreOperation",
+                    "type": "object"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "tasks"
+        ],
+        "summary": "Get Task Operation",
+        "operationId": "get_task_operation_api_tasks_operations__operation_id__get",
+        "parameters": [
+          {
+            "name": "operation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Operation Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tasks/{task_id}": {
+      "get": {
+        "tags": [
+          "tasks"
+        ],
+        "summary": "Get Task",
+        "operationId": "get_task_api_tasks__task_id__get",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "tasks"
+        ],
+        "summary": "Update Task",
+        "operationId": "update_task_api_tasks__task_id__patch",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateTaskPayload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "tasks"
+        ],
+        "summary": "Delete Task",
+        "operationId": "delete_task_api_tasks__task_id__delete",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "openapi_schemas": {
+    "DocsChangesetPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "intent": {
+          "enum": [
+            "revise_section",
+            "upsert_record",
+            "reorganize_subtree"
+          ],
+          "title": "Intent",
+          "type": "string"
+        },
+        "operations": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "add_tag": "#/components/schemas/DocsAddTagOperation",
+                "archive": "#/components/schemas/DocsArchiveOperation",
+                "create": "#/components/schemas/DocsCreateOperation",
+                "move": "#/components/schemas/DocsMoveOperation",
+                "remove_tag": "#/components/schemas/DocsRemoveTagOperation",
+                "set_fields": "#/components/schemas/DocsSetFieldsOperation",
+                "update": "#/components/schemas/DocsUpdateOperation"
+              },
+              "propertyName": "op"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DocsUpdateOperation"
+              },
+              {
+                "$ref": "#/components/schemas/DocsCreateOperation"
+              },
+              {
+                "$ref": "#/components/schemas/DocsSetFieldsOperation"
+              },
+              {
+                "$ref": "#/components/schemas/DocsAddTagOperation"
+              },
+              {
+                "$ref": "#/components/schemas/DocsRemoveTagOperation"
+              },
+              {
+                "$ref": "#/components/schemas/DocsMoveOperation"
+              },
+              {
+                "$ref": "#/components/schemas/DocsArchiveOperation"
+              }
+            ]
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "title": "Operations",
+          "type": "array"
+        }
+      },
+      "required": [
+        "intent",
+        "operations"
+      ],
+      "title": "DocsChangesetPayload",
+      "type": "object"
+    },
+    "DocsProtocolChangesetRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "changeset": {
+          "$ref": "#/components/schemas/DocsChangesetPayload"
+        },
+        "operation_id": {
+          "format": "uuid",
+          "title": "Operation Id",
+          "type": "string"
+        },
+        "project_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Project Id"
+        },
+        "root_id": {
+          "format": "uuid",
+          "title": "Root Id",
+          "type": "string"
+        },
+        "write_token": {
+          "format": "uuid",
+          "title": "Write Token",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root_id",
+        "write_token",
+        "operation_id",
+        "changeset"
+      ],
+      "title": "DocsProtocolChangesetRequest",
+      "type": "object"
+    },
+    "DocsProtocolEditReadRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "default": "",
+          "maxLength": 128,
+          "title": "Cursor",
+          "type": "string"
+        },
+        "depth": {
+          "default": 8,
+          "maximum": 32,
+          "minimum": 0,
+          "title": "Depth",
+          "type": "integer"
+        },
+        "page_chars": {
+          "default": 12000,
+          "maximum": 32000,
+          "minimum": 4096,
+          "title": "Page Chars",
+          "type": "integer"
+        },
+        "project_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Project Id"
+        },
+        "root_id": {
+          "format": "uuid",
+          "title": "Root Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root_id"
+      ],
+      "title": "DocsProtocolEditReadRequest",
+      "type": "object"
+    },
+    "DocsProtocolReadRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "default": "",
+          "maxLength": 512,
+          "title": "Cursor",
+          "type": "string"
+        },
+        "depth": {
+          "default": 8,
+          "maximum": 32,
+          "minimum": 0,
+          "title": "Depth",
+          "type": "integer"
+        },
+        "page_chars": {
+          "default": 12000,
+          "maximum": 32000,
+          "minimum": 4096,
+          "title": "Page Chars",
+          "type": "integer"
+        },
+        "project_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Project Id"
+        },
+        "root_id": {
+          "format": "uuid",
+          "title": "Root Id",
+          "type": "string"
+        },
+        "view": {
+          "default": "document",
+          "enum": [
+            "document",
+            "record",
+            "outline"
+          ],
+          "title": "View",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root_id"
+      ],
+      "title": "DocsProtocolReadRequest",
+      "type": "object"
+    },
+    "KnowledgePluginSearchPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "extension": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Extension"
+        },
+        "limit": {
+          "default": 10,
+          "maximum": 50,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "path_prefix": {
+          "anyOf": [
+            {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Path Prefix"
+        },
+        "project_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Project Id"
+        },
+        "query": {
+          "default": "",
+          "maxLength": 2000,
+          "title": "Query",
+          "type": "string"
+        },
+        "source_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Id"
+        },
+        "tags": {
+          "items": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Tags",
+          "type": "array"
+        }
+      },
+      "title": "KnowledgePluginSearchPayload",
+      "type": "object"
+    }
+  },
+  "request_contracts": {
+    "docs_changeset": {
+      "body_keys": [
+        "root_id",
+        "project_id",
+        "write_token",
+        "operation_id",
+        "changeset"
+      ],
+      "method": "POST",
+      "model": "DocsProtocolChangesetRequest",
+      "path": "/api/docs/changesets",
+      "typed_changeset_model": "DocsChangesetPayload"
+    },
+    "docs_edit_read": {
+      "body_keys": [
+        "root_id",
+        "project_id",
+        "cursor",
+        "depth",
+        "page_chars"
+      ],
+      "bounds": {
+        "cursor_max_length": 128,
+        "depth": [
+          0,
+          32
+        ],
+        "page_chars": [
+          4096,
+          32000
+        ]
+      },
+      "method": "POST",
+      "model": "DocsProtocolEditReadRequest",
+      "path": "/api/docs/edit-reads"
+    },
+    "docs_read": {
+      "body_keys": [
+        "root_id",
+        "project_id",
+        "view",
+        "cursor",
+        "depth",
+        "page_chars"
+      ],
+      "bounds": {
+        "cursor_max_length": 512,
+        "depth": [
+          0,
+          32
+        ],
+        "page_chars": [
+          4096,
+          32000
+        ]
+      },
+      "method": "POST",
+      "model": "DocsProtocolReadRequest",
+      "path": "/api/docs/reads"
+    },
+    "knowledge_read": {
+      "bounds": {
+        "fingerprint_length": 64,
+        "max_chars": [
+          1,
+          32000
+        ],
+        "offset_min": 0,
+        "view": [
+          "body",
+          "outline"
+        ]
+      },
+      "paging": {
+        "offset_gt_zero_requires_fingerprint": true,
+        "fingerprint_mismatch_status": 409,
+        "fingerprint_mismatch_code": "content_changed"
+      },
+      "method": "GET",
+      "path": "/api/knowledge/plugin/documents/{document_id}",
+      "path_parameter": "document_id",
+      "query_keys": [
+        "view",
+        "max_chars",
+        "offset",
+        "fingerprint"
+      ]
+    },
+    "knowledge_search": {
+      "body_keys": [
+        "query",
+        "source_id",
+        "project_id",
+        "tags",
+        "extension",
+        "path_prefix",
+        "limit"
+      ],
+      "forbidden_keys": [
+        "cursor"
+      ],
+      "method": "POST",
+      "model": "KnowledgePluginSearchPayload",
+      "path": "/api/knowledge/plugin/search"
+    },
+    "knowledge_sources": {
+      "method": "GET",
+      "path": "/api/knowledge/plugin/sources"
+    },
+    "task_operation": {
+      "method": "PUT",
+      "path": "/api/tasks/operations/{operation_id}",
+      "path_parameter": "operation_id",
+      "path_format": "uuid",
+      "operation_id_is_uuid": true,
+      "model": "TaskOperationRequest",
+      "actions": {
+        "create": [
+          "action",
+          "payload"
+        ],
+        "update": [
+          "action",
+          "task_id",
+          "expected_updated_at",
+          "changes"
+        ],
+        "delete": [
+          "action",
+          "task_id",
+          "expected_updated_at"
+        ],
+        "restore": [
+          "action",
+          "task_id",
+          "deletion_batch_id"
+        ]
+      },
+      "strict_extra_fields": true
+    },
+    "task_operation_status": {
+      "method": "GET",
+      "path": "/api/tasks/operations/{operation_id}",
+      "path_parameter": "operation_id",
+      "path_format": "uuid",
+      "operation_id_is_uuid": true
+    },
+    "task_list": {
+      "method": "GET",
+      "path": "/api/tasks",
+      "query_keys": [
+        "projection",
+        "limit",
+        "offset",
+        "project_id",
+        "space_id",
+        "status",
+        "assignee_id",
+        "search",
+        "due_before",
+        "updated_before"
+      ],
+      "projection": "compact",
+      "bounds": {
+        "limit": [
+          1,
+          100
+        ],
+        "offset_min": 0,
+        "query_result_limit": "limit + 1 then return at most limit"
+      },
+      "pagination": {
+        "response_header": "X-AoiTalk-Has-More",
+        "cursor": false
+      },
+      "source_symbols": [
+        "src/api/routes/tasks/tasks_routes.py:list_tasks",
+        "src/services/task_management/tasks.py:TaskService.list_tasks_compact"
+      ]
+    },
+    "task_read": {
+      "method": "GET",
+      "path": "/api/tasks/{task_id}",
+      "query_keys": [
+        "section",
+        "limit",
+        "offset",
+        "max_chars",
+        "fingerprint"
+      ],
+      "sections": [
+        "task",
+        "description",
+        "metadata",
+        "comments",
+        "references",
+        "activities",
+        "occurrences",
+        "time_entries"
+      ],
+      "bounds": {
+        "limit": [
+          1,
+          100
+        ],
+        "offset_collection_max": 10000,
+        "offset_text_sections_min": 0,
+        "max_chars": [
+          1,
+          20000
+        ]
+      },
+      "paging": {
+        "text_sections": [
+          "description",
+          "metadata"
+        ],
+        "offset_gt_zero_requires_fingerprint": true,
+        "fingerprint_mismatch_status": 409,
+        "fingerprint_mismatch_code": "task_read_stale"
+      },
+      "source_symbols": [
+        "src/api/routes/tasks/tasks_routes.py:get_task",
+        "src/api/routes/tasks/read_projection.py:get_task_section",
+        "src/api/routes/tasks/read_projection.py:_text_page"
+      ]
+    },
+    "task_timestamp": {
+      "source_symbol": "src/api/datetime_utils.py:parse_utc_naive_datetime",
+      "accepted_forms": [
+        "naive-as-UTC",
+        "Z",
+        "offset"
+      ],
+      "preserve_caller_string_for_expected_updated_at": true
+    }
+  },
+  "schema_version": "80.41-management-contract.v3",
+  "source": {
+    "absolute_root": "C:\\path\\to\\AoiTalk",
+    "commit": "b6571a8623d08b2323fce64b8d8a8cd318410c64",
+    "contract_files": [
+      "src/api/docs_routes.py",
+      "src/api/knowledge_routes.py",
+      "src/api/routes/tasks/operations_routes.py",
+      "src/api/routes/tasks/_shared.py",
+      "src/api/routes/tasks/tasks_routes.py",
+      "src/api/routes/tasks/read_projection.py",
+      "src/api/datetime_utils.py",
+      "src/services/task_management/tasks.py"
+    ],
+    "openapi_origin": "runtime FastAPI app.openapi() and Pydantic model_json_schema()/TypeAdapter.json_schema() via 41 existing venv source",
+    "repository": "41_AoiTalk",
+    "worktree": {
+      "operations_routes": {
+        "status": "dirty_beyond_head_model_dto_unchanged",
+        "head_commit": "76956697d13805a00533bcd7afdf9ad05ab61a89",
+        "frozen_parts": [
+          "_StrictPayload",
+          "_StrictCreateTaskPayload",
+          "_StrictUpdateTaskPayload",
+          "_CreateOperation",
+          "_UpdateOperation",
+          "_DeleteOperation",
+          "_RestoreOperation",
+          "_OperationRequest"
+        ],
+        "dirty_parts": [
+          "runtime operation OpenAPI schema helper and requestBody override",
+          "error helper changes",
+          "receipt visibility helper change"
+        ]
+      },
+      "read_projection": {
+        "status": "dirty_deferred",
+        "reason": "Task list/read projection and SQL-bounded parameters require 41-T root DTO confirmation."
+      }
+    },
+    "contract_file_sha256": {
+      "src/api/docs_routes.py": "2d42e943024ed111a528b1d9de4770b184bedc5ead2e2d956f4e76fe0164207d",
+      "src/api/knowledge_routes.py": "3babf52fac5f123f9bcdba99f24e6bca45976bd0242be5107e1ba51e77068331",
+      "src/api/routes/tasks/operations_routes.py": "fcd8bf2a4c8eb299d2827208323c1c9a2d36709ec11e54dde2e59245162f1b74",
+      "src/api/routes/tasks/_shared.py": "4cbe7fc2523a670857a5e9624097b08b7fac499ce96e0f8cba14c057336eec32",
+      "src/api/routes/tasks/tasks_routes.py": "bd445eadb63b86bd43c9877db43b17e4423447272b81a41b6be3164eafd3cad8",
+      "src/api/routes/tasks/read_projection.py": "0d7094726fc53c0a5ef7e007b8f792fde682d89bd887b2bab10726a773606bf4",
+      "src/api/datetime_utils.py": "e1aa5587ad2390ceb40002504ff887488c7490077d3c5d7caa546993780826ee",
+      "src/services/task_management/tasks.py": "46af95ced018a3c9dd274671cedb41e825967dbd759c7784556da694c2b929d4"
+    },
+    "task_read_list_note": "The Task list/read query parameters are manually parsed from Starlette Request in tasks_routes.py and read_projection.py; their SQL bound and details are recorded in request_contracts alongside the runtime OpenAPI paths."
+  },
+  "structured_errors": {
+    "codeless_404": {
+      "body": {
+        "detail": "Not Found"
+      },
+      "status": 404
+    },
+    "nested_409": {
+      "body": {
+        "detail": {
+          "code": "close_incomplete_subtasks_confirmation_required",
+          "message": "confirmation required"
+        }
+      },
+      "status": 409
+    },
+    "nested_not_observed_404": {
+      "body": {
+        "detail": {
+          "error": "not_observed",
+          "message": "receipt not observable"
+        }
+      },
+      "status": 404
+    },
+    "nested_task_404": {
+      "body": {
+        "detail": {
+          "code": "task_not_found",
+          "message": "task not found"
+        }
+      },
+      "status": 404
+    }
+  },
+  "deferred_contracts": {
+    "tasks_list": "deferred_41_t_freeze: read_projection.py is dirty and no virtual fixture schema may stand in for the real 41-T DTO/SQL bounded contract.",
+    "task_read": "deferred_41_t_freeze: exact section/limit/offset/max_chars/fingerprint contract awaits 41-T root confirmation."
+  }
+}

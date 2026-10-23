@@ -45,11 +45,13 @@ class ProfileTests(unittest.TestCase):
     def test_environment_does_not_inherit_credentials(self):
         env = clean_environment({**self.environment, "PATH": "safe", "AOITALK_BOOTSTRAP_ADMIN_PASSWORD": "secret",
                                  "HOME_MCP_AOITALK_ENABLED": "1", "CONTROL_PLANE_API_KEY": "secret",
+                                 "HOME_MCP_AOITALK_RUNTIME_API_KEY": "secret",
                                  "OPENAI_API_KEY": "secret", "PYTHONPATH": "untrusted"})
         self.assertEqual(env["HOME_MCP_AOITALK_ENABLED"], "0")
         self.assertEqual(env["PATH"], "safe")
         self.assertNotIn("secret", json.dumps(env))
         self.assertNotIn("PYTHONPATH", env)
+        self.assertNotIn("HOME_MCP_AOITALK_RUNTIME_API_KEY", env)
 
     def test_only_read_only_operations_are_callable(self):
         self.assertEqual(TOOLS, ("list_directory", "path_info", "read_text", "search_text"))

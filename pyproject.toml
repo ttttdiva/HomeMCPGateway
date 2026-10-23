@@ -27,6 +27,7 @@ dev = [
 
 [project.scripts]
 home-mcp-gateway = "home_mcp_gateway.server:main"
+aoitalk-plugin = "home_mcp_gateway.aoitalk_plugin_server:main"
 
 [tool.setuptools.packages.find]
 include = ["home_mcp_gateway*"]

@@ -21,9 +21,10 @@ import uuid
 from typing import Annotated, Any, Literal
 
 import httpx
-from pydantic import Field, StrictBool
+from pydantic import Field, StrictBool, StrictInt
 
-from . import aoitalk
+from . import aoitalk, aoitalk_auth
+from .aoitalk_task_diagnostics import project_diagnostics
 
 TASK_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 KEY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
@@ -68,17 +69,24 @@ MESSAGES = {
 
 
 class TaskError(Exception):
-    def __init__(self, code: str, http_status: int | None = None, detail: str | None = None):
+    def __init__(self, code: str, http_status: int | None = None, detail: str | None = None,
+                 retry_after: int | None = None, local_hold: int | None = None):
         super().__init__(MESSAGES.get(code, MESSAGES["server_error"]))
         self.code = code if code in MESSAGES else "server_error"
         self.http_status = http_status
         self.detail = detail
+        self.retry_after = retry_after
+        self.local_hold = local_hold
 
 
 def _error(exc: TaskError, **state: Any) -> dict[str, Any]:
     result: dict[str, Any] = {"ok": False, "error": exc.code, "message": MESSAGES[exc.code], **state}
     if exc.http_status is not None:
         result["http_status"] = exc.http_status
+    if exc.retry_after is not None:
+        result["retry_after_seconds"] = exc.retry_after
+    if exc.local_hold is not None:
+        result["local_cooldown_seconds"] = exc.local_hold
     if exc.detail:
         result["detail"] = exc.detail
     return result
@@ -91,6 +99,7 @@ class TaskClient(aoitalk.Client):
         try:
             async with self.http.stream(method, path, **kwargs) as response:
                 status = response.status_code
+                response_headers = response.headers
                 raw = b""
                 async for part in response.aiter_bytes():
                     raw += part
@@ -127,13 +136,19 @@ class TaskClient(aoitalk.Client):
                 fields = sorted({".".join(str(p) for p in item.get("loc", [])[1:])
                                  for item in raw_detail if isinstance(item, dict)})
                 detail = "invalid fields: " + ", ".join(fields[:10])
-        raise TaskError(code, status, detail)
+        retry_after = aoitalk.parse_retry_after(response_headers.get("retry-after")) if status == 429 else None
+        raise TaskError(code, status, detail, retry_after)
 
     async def login_task(self) -> None:
         try:
             await self.login()
         except aoitalk.ClipError as exc:
-            raise TaskError(exc.code if exc.code in MESSAGES else "server_error", exc.http_status) from None
+            raise _task_error(exc) from None
+
+
+def _task_error(exc: aoitalk.ClipError) -> TaskError:
+    return TaskError(exc.code if exc.code in MESSAGES else "server_error", exc.http_status,
+                     retry_after=exc.retry_after, local_hold=exc.local_hold)
 
 
 async def _session(fn):
@@ -141,12 +156,9 @@ async def _session(fn):
         settings = aoitalk.load_settings()
     except aoitalk.ClipError:
         raise TaskError("configuration_error") from None
-    client = TaskClient(settings)
-    try:
-        await client.login_task()
+    async with aoitalk_auth.client_for(TaskClient, settings, lambda c: c.login_task(), _task_error,
+                                       lambda e: isinstance(e, TaskError) and e.http_status == 401) as client:
         return _sanitize(await fn(client), settings)
-    finally:
-        await client.http.aclose()
 
 
 def _task_id(value: Any) -> str:
@@ -222,6 +234,9 @@ def _sanitize(value: Any, settings: aoitalk.Settings) -> Any:
         "cancel_requested", "failure_reason", "failure_detail", "summary_text", "completion_summary",
         "stalled", "worker_alive", "stall_threshold_sec", "baseline", "llm", "is_terminal", "result",
         "stopped_reason", "rounds", "report", "report_parsed", "checks", "git", "commands",
+        "failure", "tool_failures", "reason", "successful_tool_count", "successful_tools",
+        "unresolved_tools", "recovered_count", "unresolved_count", "recovered_tools",
+        "tool", "denied", "receipt_id",
         "enabled", "running", "allowed_roots", "max_concurrency", "limits", "queued", "default_agent_id",
         "integration", "llm_calls", "tool_calls", "tool_requests", "tool_failures", "blocked_calls",
         "commands_failed", "files_written",
@@ -361,6 +376,10 @@ def _canonical_task(data: dict[str, Any]) -> dict[str, Any]:
     if "cancellation_requested" in task:
         task["cancel_requested"] = task.pop("cancellation_requested")
     task["executor"] = "aoitalk_agent_task"
+    diagnostics = project_diagnostics(task)
+    task.pop("failure", None)
+    task.pop("tool_failures", None)
+    task.update(diagnostics)
     return _task({"task": task})
 
 
@@ -408,8 +427,8 @@ async def aoitalk_local_task_start(
     allow_adb: bool = False,
     allow_git_commit: bool = False,
     max_tool_rounds: Annotated[int | None, Field(ge=1, le=1000)] = None,
-    timeout_sec: Annotated[int | None, Field(ge=1, le=86400)] = None,
-    command_timeout_sec: Annotated[int | None, Field(ge=1, le=86400)] = None,
+    timeout_sec: Annotated[StrictInt | None, Field(ge=1, le=86400)] = None,
+    command_timeout_sec: Annotated[StrictInt | None, Field(ge=1, le=86400)] = None,
     expected_branch: Annotated[str | None, Field(max_length=200)] = None,
     idempotency_key: Annotated[str | None, Field(pattern=r"^[A-Za-z0-9._:-]{1,128}$")] = None,
     agent_id: Annotated[str | None, Field(min_length=36, max_length=36)] = None,
@@ -421,6 +440,8 @@ async def aoitalk_local_task_start(
     edit_targets: Annotated[list[Annotated[str, Field(min_length=1, max_length=512)]] | None,
                             Field(max_length=20)] = None,
     requires_command_verification: StrictBool | None = None,
+    execution_profile_id: Annotated[str | None, Field(min_length=1, max_length=64)] = None,
+    tool_generation_max_tokens: Annotated[StrictInt | None, Field(ge=1, le=4096)] = None,
 ) -> dict[str, Any]:
     """Delegate a multi-step workspace goal to AoiTalk's LLM agent; returns task_id at once.
 
@@ -458,6 +479,10 @@ async def aoitalk_local_task_start(
     AoiTalk's wording-based inference. true with allow_commands=false is
     contradictory (rejected by AoiTalk); false marks a static/file-verification
     task and is not a claim that tests ran.
+    execution_profile_id and tool_generation_max_tokens are canonical-only and
+    forwarded exactly; a legacy request supplying either is rejected. On the
+    canonical route timeout_sec is limited to 1-3600 and command_timeout_sec to
+    1-900 and both are forwarded; legacy keeps its existing ranges.
     """
     key = idempotency_key if idempotency_key is not None else f"gw-{uuid.uuid4().hex}"
     state: dict[str, Any] = {"idempotency_key": key}
@@ -518,13 +543,21 @@ async def aoitalk_local_task_start(
                     ),
                 )
 
+        if not canonical and (execution_profile_id is not None or tool_generation_max_tokens is not None):
+            raise TaskError(
+                "invalid_input",
+                detail=(
+                    "execution_profile_id and tool_generation_max_tokens are supported only on the "
+                    "canonical Agent API (agent_id supplied, provider omitted); legacy local-task "
+                    "requests cannot honor them"
+                ),
+            )
+
         if canonical:
             legacy_only_options = (
                 allow_adb,
                 allow_git_commit,
                 max_tool_rounds,
-                timeout_sec,
-                command_timeout_sec,
                 expected_branch,
             )
             if any(value not in (None, False) for value in legacy_only_options):
@@ -532,7 +565,7 @@ async def aoitalk_local_task_start(
                     "invalid_input",
                     detail=(
                         "agent_id with omitted provider uses the canonical Agent API; "
-                        "ADB, Git commit, timeout, max_tool_rounds and expected_branch "
+                        "ADB, Git commit, max_tool_rounds and expected_branch "
                         "options are not supported on that route"
                     ),
                 )
@@ -554,6 +587,10 @@ async def aoitalk_local_task_start(
                 required_outputs=required_outputs,
                 edit_targets=edit_targets,
                 requires_command_verification=requires_command_verification,
+                execution_profile_id=execution_profile_id,
+                tool_generation_max_tokens=tool_generation_max_tokens,
+                timeout_sec=timeout_sec,
+                command_timeout_sec=command_timeout_sec,
             )
             if not routed.get("ok"):
                 return routed
@@ -606,6 +643,7 @@ def _compact(task: dict[str, Any]) -> dict[str, Any]:
             "counters", "changed_files", "cancel_requested", "failure_reason", "failure_detail",
             "summary_text", "completion_summary", "stalled", "worker_alive", "stall_threshold_sec",
             "baseline", "llm", "is_terminal")
+    keep += ("failure", "tool_failures")
     result = {**_identity(task), **{key: task[key] for key in keep if key in task}}
     detail = task.get("result")
     if task.get("executor") == "aoitalk_agent_task" and "result" in task:

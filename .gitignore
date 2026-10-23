@@ -34,3 +34,10 @@ tunnel-client-*/
 .idea/
 Thumbs.db
 Desktop.ini
+
+# Private workspace configuration, evidence, and local publication artifacts
+/.codex/
+/docs/evidence/
+/repo.local/
+/runtime/
+/stdout

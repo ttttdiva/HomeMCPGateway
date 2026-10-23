@@ -14,7 +14,7 @@ from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
 from dotenv import dotenv_values
 
-from . import core, aoitalk, aoitalk_agent_tasks, aoitalk_cli_sessions, aoitalk_tasks, image_library, local_plan
+from . import core, aoitalk, aoitalk_auth, aoitalk_agent_tasks, aoitalk_cli_sessions, aoitalk_tasks, image_library, local_plan
 from .aoitalk_task_schema import structured_task_tool
 from .aoitalk_agent_task_schema import structured_agent_task_tool
 from .aoitalk_cli_session_schema import structured_cli_session_tool
@@ -44,10 +44,14 @@ def _aoitalk_enabled() -> bool:
 
 @asynccontextmanager
 async def lifespan(server):
+    await aoitalk_auth.activate()
     try:
         yield {}
     finally:
-        await browser_qa.close_all()
+        try:
+            await aoitalk_auth.deactivate()
+        finally:
+            await browser_qa.close_all()
 
 
 mcp = MCPServer(

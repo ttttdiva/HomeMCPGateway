@@ -192,6 +192,10 @@ HOME_MCP_AOITALK_ENABLED=1
 
 AoiTalk 自体が PC にインストール済みで、接続先・認証・必要な機能が設定済みである必要があります。この Gateway は AoiTalk をインストールまたは設定しません。AoiTalk が無効なら **76 tools**、有効なら **97 tools** が公開されます。認証情報を ChatGPT に渡さないでください。
 
+専用の AoiTalk MCP 接続は汎用Gatewayとは別の **35 tools** を公開します。Phase Aでは旧Gateway側の21 toolsもソースと公開面に残して移行確認を行います。専用接続には、別途用意したTunnel IDを `.env` の `HOME_MCP_AOITALK_TUNNEL_ID` に設定し、必要なら `HOME_MCP_AOITALK_RUNTIME_API_KEY` に専用Restricted runtime keyを設定します。専用Tunnelの運用preflight後に `scripts\connect_tunnel.ps1 -Target aoitalk` を使います。既定alias/profileは `aoitalk`、状態とログは `.runtime\aoitalk\`、profileファイルは `.runtime\profiles\aoitalk.yaml` です。自動起動を登録する場合は `scripts\install_autostart.ps1 -Target aoitalk` を使い、既定TaskName `Home MCP Gateway - AoiTalk` を利用します。どちらのコマンドもTunnelを新規発行せず、GUIでのPlugin追加・Refreshは行いません。
+
+専用MCPのtool構成、operation IDによる安全な再照合、Docs/Knowledgeのページング契約は [AoiTalk専用MCP](docs/aoitalk-plugin.md) を参照してください。
+
 正準 Agent / Qwen route の選択、read-only stdio scope、接続・検証・OFFへの戻し方は
 [Agent 委譲の接続手順](docs/aoitalk-agent-delegation.md) を参照してください。
 
@@ -208,6 +212,7 @@ AoiTalk 自体が PC にインストール済みで、接続先・認証・必�
 | 開発ワークフロー | Git リポジトリ / worktree、長時間ジョブ、ブラウザ（Playwright） |
 | 画像・診断 | 画像コンテキスト、ツール実行のローカル診断ログ |
 | AoiTalk（任意） | クリップ取り込み、ローカル／API Agentタスク委譲・最終回答取得、CLI継続セッション。21 ツールを追加 |
+| AoiTalk専用Plugin | Task/Docs/Knowledge管理を含む専用35 tools。汎用Gatewayとは別Tunnel/runtime |
 
 これらのグループにもアクセス制限や read-only 境界が追加されるわけではありません。接続相手とプロンプトを信頼できる範囲に限定してください。
 

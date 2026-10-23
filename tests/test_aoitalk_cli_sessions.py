@@ -54,6 +54,8 @@ class API:
         self.large_event = False
         self.unicode_large_event = False
         self.error_code: str | None = None
+        self.error_status = 409
+        self.remote_response: dict | None = None
         self.create_bodies: list[dict] = []
         self.send_bodies: list[dict] = []
         self.sent_keys: set[str] = set()
@@ -71,10 +73,11 @@ class API:
             return httpx.Response(401, json={"error": "authentication_failed"})
         if path == "/api/cli-sessions" and request.method == "POST":
             if self.error_code:
-                return httpx.Response(409, json={"code": self.error_code})
+                return httpx.Response(self.error_status, json={"code": self.error_code})
             body = json.loads(request.content)
             self.create_bodies.append(body)
-            return httpx.Response(202, json={**self.session, "success": True, "accepted": True,
+            response = self.remote_response if body.get("provider") == "muse-remote" and self.remote_response else self.session
+            return httpx.Response(202, json={**response, "success": True, "accepted": True,
                                              "created": True, "idempotency_key": body["idempotency_key"]})
         if path == "/api/cli-sessions" and request.method == "GET":
             return httpx.Response(200, json={"sessions": [self.session]})
@@ -227,6 +230,247 @@ class CliSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(self.api.create_bodies[-1]["permission_mode"], "accept_edits")
 
+    async def test_remote_projection_exposes_safety_metadata_without_private_material(self):
+        raw = {
+            "provider": "muse-remote",
+            "execution_target": "remote_muse",
+            "local_filesystem": False,
+            "sandbox": "remote_uncontrolled",
+            "turn_status": "confirmed",
+            "working_directory": WORKSPACE,
+            "credential_ref": "server-secret-ref",
+            "lease_token": "server-lease-token",
+            "role_context": {"text": "private role body"},
+            "role_delivery": {
+                "mode": "managed_role",
+                "mechanism": "first_turn_user_prefix",
+                "text": "private role body",
+                "system_prompt_applied": False,
+            },
+            "run": {
+                "result": {
+                    "turn_status": "confirmed",
+                    "delivery": {
+                        "mechanism": "first_turn_user_prefix",
+                        "content": "private role body",
+                    },
+                    "role_context": {"text": "private role body"},
+                },
+                "resolved_execution_manifest": {
+                    "working_directory": WORKSPACE,
+                    "role_context": {"text": "private role body"},
+                },
+            },
+        }
+        result = cli._sanitize(raw, SETTINGS)
+        self.assertEqual(result["execution_target"], "remote_muse")
+        self.assertFalse(result["local_filesystem"])
+        self.assertEqual(result["sandbox"], "remote_uncontrolled")
+        self.assertEqual(result["turn_status"], "confirmed")
+        self.assertEqual(result["delivery"]["mechanism"], "first_turn_user_prefix")
+        self.assertNotIn("working_directory", json.dumps(result))
+        for marker in (
+            "server-secret-ref", "server-lease-token", "private role body", "credential_ref", "lease_token",
+        ):
+            self.assertNotIn(marker, json.dumps(result))
+
+    async def test_create_schema_hook_leaves_other_tool_schema_unchanged(self):
+        from mcp.server.mcpserver.tools.base import Tool
+        from home_mcp_gateway.aoitalk_cli_session_schema import structured_cli_session_tool
+        from home_mcp_gateway.telemetry import instrument_tool
+
+        def other_tool(value: str, count: int = 1) -> dict[str, object]:
+            return {"value": value, "count": count}
+
+        before = json.loads(json.dumps(Tool.from_function(other_tool).parameters))
+        structured_cli_session_tool(instrument_tool(cli.aoitalk_cli_session_create))
+        after = Tool.from_function(other_tool).parameters
+        self.assertEqual(after, before)
+        self.assertNotIn("oneOf", after)
+
+    async def test_muse_remote_provider_is_visible_and_forwards_only_remote_fields(self):
+        from mcp.server import MCPServer
+        from home_mcp_gateway.aoitalk_cli_session_schema import structured_cli_session_tool
+        from home_mcp_gateway.telemetry import instrument_tool
+
+        server = MCPServer("schema-check")
+        server.tool()(structured_cli_session_tool(instrument_tool(cli.aoitalk_cli_session_create)))
+        tool = (await server.list_tools())[0]
+        schema = tool.input_schema
+        self.assertIn("muse-remote", schema["properties"]["provider"]["enum"])
+        self.assertEqual(schema["required"], ["agent_id", "provider", "idempotency_key"])
+        self.assertNotIn("model", schema["required"])
+        self.assertNotIn("working_directory", schema["required"])
+        variants = schema["oneOf"]
+        local_schema = next(variant for variant in variants
+                            if variant["properties"]["provider"]["enum"] == [
+                                "codex-cli", "claude-cli", "grok-cli", "antigravity-cli",
+                            ])
+        remote_schema = next(variant for variant in variants
+                             if variant["properties"]["provider"].get("const") == "muse-remote")
+        self.assertEqual(
+            local_schema["required"],
+            ["agent_id", "provider", "model", "working_directory", "idempotency_key"],
+        )
+        self.assertEqual(local_schema["properties"]["model"]["type"], "string")
+        self.assertEqual(local_schema["properties"]["working_directory"]["type"], "string")
+        self.assertEqual(
+            local_schema["properties"]["permission_mode"]["enum"],
+            ["native_default", "standard", "accept_edits"],
+        )
+        self.assertEqual(local_schema["properties"]["permission_mode"]["default"], "native_default")
+        self.assertIsNone(local_schema["properties"]["effort"]["default"])
+        self.assertIsNone(local_schema["properties"]["allowed_capabilities"]["default"])
+        self.assertNotIn("permission_mode", local_schema["required"])
+        self.assertNotIn("allowed_capabilities", local_schema["required"])
+        self.assertEqual(remote_schema["required"], ["agent_id", "provider", "idempotency_key"])
+        self.assertTrue(remote_schema["additionalProperties"] is False)
+        self.assertIn("role_context_mode", remote_schema["properties"])
+        self.assertIn("agent_revision_id", remote_schema["properties"])
+        for unsupported in (
+            "model", "effort", "working_directory", "permission_mode", "allowed_capabilities",
+        ):
+            self.assertNotIn(unsupported, remote_schema["properties"])
+
+        result = await server.call_tool("aoitalk_cli_session_create", {
+            "agent_id": AGENT_ID,
+            "provider": "muse-remote",
+            "idempotency_key": "remote-schema",
+            "title": "Remote review",
+            "execution_profile_id": "remote-profile",
+        })
+        self.assertFalse(result.is_error, result)
+        self.assertTrue(result.structured_content["ok"], result.structured_content)
+        self.assertEqual(self.api.create_bodies[-1], {
+            "agent_id": AGENT_ID,
+            "provider": "muse-remote",
+            "idempotency_key": "remote-schema",
+            "title": "Remote review",
+            "execution_profile_id": "remote-profile",
+        })
+
+        # The runtime invocation path must preserve omitted sentinels and avoid
+        # injecting local-only defaults into the server-owned route.
+        managed = await server.call_tool("aoitalk_cli_session_create", {
+            "agent_id": AGENT_ID,
+            "provider": "muse-remote",
+            "idempotency_key": "remote-managed-omitted-pin",
+            "role_context_mode": "agent_role",
+        })
+        self.assertFalse(managed.is_error, managed)
+        self.assertTrue(managed.structured_content["ok"], managed.structured_content)
+        self.assertEqual(self.api.create_bodies[-1], {
+            "agent_id": AGENT_ID,
+            "provider": "muse-remote",
+            "idempotency_key": "remote-managed-omitted-pin",
+            "role_context_mode": "agent_role",
+        })
+
+        before = len(self.api.calls)
+        invalid = await server.call_tool("aoitalk_cli_session_create", {
+            "agent_id": AGENT_ID,
+            "provider": "muse-remote",
+            "idempotency_key": "remote-schema-null-model",
+            "model": None,
+        })
+        self.assertFalse(invalid.is_error)
+        self.assertEqual(invalid.structured_content["error"], "invalid_input")
+        self.assertEqual(len(self.api.calls), before)
+
+    async def test_muse_remote_rejects_unsupported_fields_before_network(self):
+        before = len(self.api.calls)
+        unsupported = (
+            ("model", "fake-model"),
+            ("model", None),
+            ("working_directory", WORKSPACE),
+            ("working_directory", None),
+            ("permission_mode", "native_default"),
+            ("permission_mode", None),
+            ("allowed_capabilities", ["workspace_read"]),
+            ("allowed_capabilities", None),
+            ("effort", "high"),
+            ("effort", None),
+        )
+        for index, (name, value) in enumerate(unsupported):
+            result = await cli.aoitalk_cli_session_create(
+                AGENT_ID,
+                "muse-remote",
+                idempotency_key=f"remote-invalid-{index}",
+                **{name: value},
+            )
+            self.assertEqual(result["error"], "invalid_input", (name, value))
+        self.assertEqual(len(self.api.calls), before)
+
+    async def test_local_create_requires_model_and_workspace_and_keeps_native_default(self):
+        before = len(self.api.calls)
+        missing_model = await cli.aoitalk_cli_session_create(
+            AGENT_ID, "codex-cli", idempotency_key="local-missing-model"
+        )
+        missing_workspace = await cli.aoitalk_cli_session_create(
+            AGENT_ID, "codex-cli", "gpt-5-codex", idempotency_key="local-missing-workspace"
+        )
+        null_model = await cli.aoitalk_cli_session_create(
+            AGENT_ID, "codex-cli", None, WORKSPACE, "local-null-model"
+        )
+        self.assertEqual(missing_model["error"], "invalid_input")
+        self.assertEqual(missing_workspace["error"], "invalid_input")
+        self.assertEqual(null_model["error"], "invalid_input")
+        self.assertEqual(len(self.api.calls), before)
+
+        result = await cli.aoitalk_cli_session_create(
+            AGENT_ID, "codex-cli", "gpt-5-codex", WORKSPACE, "local-default"
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.api.create_bodies[-1], {
+            "agent_id": AGENT_ID,
+            "provider": "codex-cli",
+            "model": "gpt-5-codex",
+            "working_directory": WORKSPACE,
+            "idempotency_key": "local-default",
+            "permission_mode": "native_default",
+        })
+
+    async def test_role_context_mode_forwards_for_local_and_remote_and_rejects_invalid(self):
+        local = await cli.aoitalk_cli_session_create(
+            AGENT_ID,
+            "codex-cli",
+            "gpt-5-codex",
+            WORKSPACE,
+            "role-local",
+            role_context_mode="agent_role",
+        )
+        self.assertTrue(local["ok"], local)
+        self.assertEqual(self.api.create_bodies[-1]["role_context_mode"], "agent_role")
+
+        remote = await cli.aoitalk_cli_session_create(
+            AGENT_ID,
+            "muse-remote",
+            idempotency_key="role-remote",
+            role_context_mode="raw",
+        )
+        self.assertTrue(remote["ok"], remote)
+        self.assertEqual(self.api.create_bodies[-1]["role_context_mode"], "raw")
+
+        await cli.aoitalk_cli_session_create(
+            AGENT_ID,
+            "muse-remote",
+            idempotency_key="role-null",
+            role_context_mode=None,
+        )
+        self.assertNotIn("role_context_mode", self.api.create_bodies[-1])
+
+        before = len(self.api.calls)
+        invalid = await cli.aoitalk_cli_session_create(
+            AGENT_ID,
+            "codex-cli",
+            "gpt-5-codex",
+            WORKSPACE,
+            "role-invalid",
+            role_context_mode="unexpected",
+        )
+        self.assertEqual(invalid["error"], "invalid_input")
+        self.assertEqual(len(self.api.calls), before)
+
     async def test_allowed_capabilities_forwarded_exactly_and_omitted_by_default(self):
         result = await cli.aoitalk_cli_session_create(
             AGENT_ID, "claude-cli", "claude-sonnet", WORKSPACE, "cap-1",
@@ -256,26 +500,195 @@ class CliSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("execution_profile_id", omitted)
         self.assertEqual(self.api.create_bodies[-1], omitted)
 
-    async def test_execution_profile_id_forwarded_trimmed_with_idempotency_and_capabilities(self):
-        result = await cli.aoitalk_cli_session_create(
-            AGENT_ID, "claude-cli", "claude-sonnet", WORKSPACE, "prof-1",
-            allowed_capabilities=["workspace_read"], execution_profile_id="  profile-abc  ",
+    async def test_execution_profile_id_forwarded_exactly_with_idempotency_and_capabilities(self):
+        for index, value in enumerate(("p", "x" * 64, "profile-abc")):
+            result = await cli.aoitalk_cli_session_create(
+                AGENT_ID, "claude-cli", "claude-sonnet", WORKSPACE, f"prof-{index}",
+                allowed_capabilities=["workspace_read"], execution_profile_id=value,
+            )
+            self.assertTrue(result["ok"], result)
+            body = self.api.create_bodies[-1]
+            self.assertEqual(body["execution_profile_id"], value)
+            self.assertEqual(body["allowed_capabilities"], ["workspace_read"])
+            self.assertEqual(body["idempotency_key"], f"prof-{index}")
+            self.assertEqual(result["idempotency_key"], f"prof-{index}")
+
+    async def test_same_idempotency_key_and_input_repeat_identical_body(self):
+        kwargs = dict(effort="high", permission_mode="standard",
+                      allowed_capabilities=["workspace_read"], execution_profile_id="x" * 64)
+        for _ in range(2):
+            result = await cli.aoitalk_cli_session_create(
+                AGENT_ID, "claude-cli", "claude-sonnet", WORKSPACE, "retry-1", **kwargs)
+            self.assertTrue(result["ok"], result)
+        first, second = self.api.create_bodies[-2:]
+        self.assertEqual(first, second)
+        self.assertEqual(second["allowed_capabilities"], ["workspace_read"])
+        self.assertEqual(second["execution_profile_id"], "x" * 64)
+        self.assertEqual(second["model"], "claude-sonnet")
+        self.assertEqual(second["effort"], "high")
+        self.assertEqual(second["permission_mode"], "standard")
+        self.assertEqual(second["idempotency_key"], "retry-1")
+
+    async def test_agent_revision_pin_is_optional_exact_and_validated_for_both_routes(self):
+        revision_id = "22222222-2222-4222-8222-222222222222"
+        for provider, args in (
+            ("claude-cli", ("claude-sonnet", WORKSPACE)),
+            ("muse-remote", ()),
+        ):
+            result = await cli.aoitalk_cli_session_create(
+                AGENT_ID, provider, *args, idempotency_key=f"pin-{provider}",
+                agent_revision_id=revision_id,
+            )
+            self.assertTrue(result["ok"], result)
+            body = self.api.create_bodies[-1]
+            self.assertEqual(body["agent_revision_id"], revision_id)
+            self.assertEqual(body["provider"], provider)
+
+        before = len(self.api.create_bodies)
+        await cli.aoitalk_cli_session_create(
+            AGENT_ID, "muse-remote", idempotency_key="pin-null", agent_revision_id=None,
         )
-        self.assertTrue(result["ok"], result)
-        body = self.api.create_bodies[-1]
-        self.assertEqual(body["execution_profile_id"], "profile-abc")
-        self.assertEqual(body["allowed_capabilities"], ["workspace_read"])
-        self.assertEqual(body["idempotency_key"], "prof-1")
-        self.assertEqual(result["idempotency_key"], "prof-1")
+        self.assertNotIn("agent_revision_id", self.api.create_bodies[-1])
+        for bad in (
+            "", "not-a-uuid", "22222222-2222-0222-8222-222222222222",
+            "11111111-1111-1111-1111-111111111111", "2" * 36,
+        ):
+            result = await cli.aoitalk_cli_session_create(
+                AGENT_ID, "muse-remote", idempotency_key="pin-invalid",
+                agent_revision_id=bad,
+            )
+            self.assertEqual(result["error"], "invalid_input", bad)
+        self.assertEqual(len(self.api.create_bodies), before + 1)
+
+    async def test_same_key_managed_create_repeats_identical_omitted_pin_body(self):
+        kwargs = {"role_context_mode": "agent_role"}
+        for _ in range(2):
+            result = await cli.aoitalk_cli_session_create(
+                AGENT_ID, "muse-remote", idempotency_key="managed-retry", **kwargs,
+            )
+            self.assertTrue(result["ok"], result)
+        first, second = self.api.create_bodies[-2:]
+        self.assertEqual(first, second)
+        self.assertNotIn("agent_revision_id", second)
+        self.assertEqual(second["role_context_mode"], "agent_role")
+
+    async def test_backend_revision_and_role_errors_remain_actionable(self):
+        codes = (
+            "agent_revision_stale", "agent_revision_pin_unavailable",
+            "agent_revision_binding_required", "agent_revision_id_invalid",
+            "session_admission_incomplete", "session_admission_storage_error",
+            "session_admission_unavailable", "role_context_mode_invalid",
+            "role_context_invalid", "agent_role_context_unavailable",
+            "agent_role_context_mismatch",
+        )
+        for code in codes:
+            self.api.error_code = code
+            result = await cli.aoitalk_cli_session_create(
+                AGENT_ID, "muse-remote", idempotency_key=f"error-{code}",
+            )
+            self.assertEqual(result["error"], code)
+            self.assertEqual(result["http_status"], 409)
+            self.assertFalse(result["submission_uncertain"])
+        self.api.error_code = "arbitrary_sensitive_backend_detail"
+        result = await cli.aoitalk_cli_session_create(
+            AGENT_ID, "muse-remote", idempotency_key="error-arbitrary",
+        )
+        self.assertEqual(result["error"], "conflict")
+        self.assertNotIn("arbitrary_sensitive_backend_detail", json.dumps(result))
+        self.api.error_code = None
+
+    async def test_remote_reply_schema_and_text_preserve_safe_public_fields_only(self):
+        from mcp.server import MCPServer
+        from home_mcp_gateway.aoitalk_cli_session_schema import structured_cli_session_tool
+        from home_mcp_gateway.telemetry import instrument_tool
+
+        revision_id = "22222222-2222-4222-8222-222222222222"
+        digest = "a" * 64
+        self.api.remote_response = {
+            "session_id": SESSION_ID,
+            "provider": "muse-remote",
+            "agent_revision_id": revision_id,
+            "binding_id": "33333333-3333-4333-8333-333333333333",
+            "role_context_mode": "agent_role",
+            "role_context_sha256": digest,
+            "execution_target": "remote_muse",
+            "local_filesystem": False,
+            "sandbox": "remote_uncontrolled",
+            "turn_status": "prepared",
+            "safe_to_send": True,
+            "delivery": {"mode": "managed_role", "status": "prepared", "text": "private role body"},
+            "role_context": "private role body",
+            "credential_ref": "remote-credential-ref",
+            "native_handle": "remote-native-handle",
+            "working_directory": WORKSPACE,
+            "run": {"resolved_execution_manifest": {"working_directory": WORKSPACE}},
+        }
+        server = MCPServer("reply-schema-check")
+        server.tool()(structured_cli_session_tool(instrument_tool(cli.aoitalk_cli_session_create)))
+        tool = (await server.list_tools())[0]
+        output_properties = tool.output_schema["properties"]
+        for name in (
+            "agent_revision_id", "binding_id", "role_context_mode", "role_context_sha256",
+            "execution_target", "local_filesystem", "sandbox", "turn_status", "delivery",
+        ):
+            self.assertIn(name, output_properties)
+        call = await server.call_tool("aoitalk_cli_session_create", {
+            "agent_id": AGENT_ID,
+            "provider": "muse-remote",
+            "idempotency_key": "reply-schema",
+            "agent_revision_id": revision_id,
+            "role_context_mode": "agent_role",
+        })
+        self.assertFalse(call.is_error, call)
+        structured = call.structured_content
+        text_json = json.loads(call.content[0].text)
+        self.assertEqual(text_json, structured)
+        self.assertEqual(structured["agent_revision_id"], revision_id)
+        self.assertEqual(structured["binding_id"], "33333333-3333-4333-8333-333333333333")
+        self.assertEqual(structured["role_context_mode"], "agent_role")
+        self.assertEqual(structured["role_context_sha256"], digest)
+        self.assertEqual(structured["execution_target"], "remote_muse")
+        self.assertFalse(structured["local_filesystem"])
+        self.assertEqual(structured["sandbox"], "remote_uncontrolled")
+        self.assertEqual(structured["turn_status"], "prepared")
+        self.assertEqual(structured["delivery"]["mode"], "managed_role")
+        for private in (
+            "private role body", "remote-credential-ref", "remote-native-handle", WORKSPACE,
+        ):
+            self.assertNotIn(private, json.dumps(structured))
+
+    async def test_del_and_c1_control_execution_profile_id_rejected_before_network(self):
+        before = len(self.api.calls)
+        for cp in (0x7F, *range(0x80, 0xA0)):
+            result = await cli.aoitalk_cli_session_create(
+                AGENT_ID, "claude-cli", "m", WORKSPACE, "ctl", execution_profile_id="a" + chr(cp) + "b")
+            self.assertEqual(result["error"], "invalid_input", hex(cp))
+        self.assertEqual(len(self.api.calls), before)
 
     async def test_invalid_execution_profile_id_rejected_before_network(self):
         before = len(self.api.calls)
-        for bad in ("", "   ", "x" * 129, 1, ["p"], {"id": "p"}, "a\nb"):
+        for bad in ("", "   ", "x" * 65, "x" * 128, " p", "p ", "  profile-abc  ", "a b", 1, ["p"],
+                    {"id": "p"}, "a\nb","a\x00b", "a\tb"):
             result = await cli.aoitalk_cli_session_create(
                 AGENT_ID, "claude-cli", "m", WORKSPACE, "prof-bad", execution_profile_id=bad
             )
             self.assertEqual(result["error"], "invalid_input", bad)
         self.assertEqual(len(self.api.calls), before)
+
+    async def test_execution_profile_schema_is_optional_min1_max64(self):
+        from mcp.server import MCPServer
+        from home_mcp_gateway.aoitalk_cli_session_schema import structured_cli_session_tool
+        from home_mcp_gateway.telemetry import instrument_tool
+        server = MCPServer("schema-check")
+        server.tool()(structured_cli_session_tool(instrument_tool(cli.aoitalk_cli_session_create)))
+        listing = {tool.name: tool for tool in await server.list_tools()}
+        schema = listing["aoitalk_cli_session_create"].input_schema
+        prop = schema["properties"]["execution_profile_id"]
+        self.assertNotIn("execution_profile_id", schema["required"])
+        text = json.dumps(prop)
+        self.assertIn('"minLength": 1', text)
+        self.assertIn('"maxLength": 64', text)
+        self.assertIn("allowed_capabilities", schema["properties"])
 
     async def test_mock_non_codex_session_workflow_forwards_synthetic_repository_without_spawning_cli(self):
         scratch_root = Path(__file__).resolve().parents[1] / ".local"
@@ -871,20 +1284,38 @@ class StdioCliSessionTests(unittest.TestCase):
                         create_schema = listing["aoitalk_cli_session_create"].input_schema
                         self.assertEqual(
                             create_schema["required"],
-                            ["agent_id", "provider", "model", "working_directory", "idempotency_key"],
+                            ["agent_id", "provider", "idempotency_key"],
                         )
                         self.assertEqual(
                             create_schema["properties"]["provider"]["enum"],
-                            ["codex-cli", "claude-cli", "grok-cli", "antigravity-cli"],
+                            ["codex-cli", "claude-cli", "grok-cli", "antigravity-cli", "muse-remote"],
                         )
+                        variants = create_schema["oneOf"]
+                        local_schema = next(variant for variant in variants
+                                            if variant["properties"]["provider"].get("enum") == [
+                                                "codex-cli", "claude-cli", "grok-cli", "antigravity-cli",
+                                            ])
+                        remote_schema = next(variant for variant in variants
+                                             if variant["properties"]["provider"].get("const") == "muse-remote")
+                        self.assertIn("model", local_schema["required"])
+                        self.assertIn("working_directory", local_schema["required"])
+                        self.assertEqual(remote_schema["required"], ["agent_id", "provider", "idempotency_key"])
+                        self.assertNotIn("model", remote_schema["properties"])
+                        self.assertNotIn("working_directory", remote_schema["properties"])
+                        permission_schema = create_schema["properties"]["permission_mode"]
                         self.assertEqual(
-                            create_schema["properties"]["permission_mode"]["enum"],
+                            permission_schema["anyOf"][0]["enum"],
                             ["native_default", "standard", "accept_edits"],
                         )
                         self.assertIn("allowed_capabilities", create_schema["properties"])
                         self.assertNotIn("allowed_capabilities", create_schema["required"])
                         self.assertIn("execution_profile_id", create_schema["properties"])
                         self.assertNotIn("execution_profile_id", create_schema["required"])
+                        self.assertIn("agent_revision_id", create_schema["properties"])
+                        self.assertNotIn("agent_revision_id", create_schema["required"])
+                        ep_schema = json.dumps(create_schema["properties"]["execution_profile_id"])
+                        self.assertIn('"minLength": 1', ep_schema)
+                        self.assertIn('"maxLength": 64', ep_schema)
                         self.assertTrue(listing["aoitalk_cli_session_status"].annotations.read_only_hint)
                         self.assertTrue(listing["aoitalk_cli_session_reconnect"].annotations.read_only_hint)
                         self.assertFalse(listing["aoitalk_cli_session_send"].annotations.read_only_hint)
@@ -898,6 +1329,21 @@ class StdioCliSessionTests(unittest.TestCase):
                         })
                         self.assertFalse(started.is_error)
                         self.assertEqual(started.structured_content["session_id"], SESSION_ID)
+                        remote = await session.call_tool("aoitalk_cli_session_create", {
+                            "agent_id": AGENT_ID,
+                            "provider": "muse-remote",
+                            "idempotency_key": "stdio-remote-omitted-pin",
+                            "role_context_mode": "agent_role",
+                        })
+                        self.assertFalse(remote.is_error, remote)
+                        self.assertTrue(remote.structured_content["ok"])
+                        self.assertEqual(api.create_bodies[-1], {
+                            "agent_id": AGENT_ID,
+                            "provider": "muse-remote",
+                            "idempotency_key": "stdio-remote-omitted-pin",
+                            "role_context_mode": "agent_role",
+                        })
+                        self.assertNotIn("agent_revision_id", api.create_bodies[-1])
                         status = await session.call_tool("aoitalk_cli_session_status", {"session_id": SESSION_ID})
                         self.assertFalse(status.is_error, status)
                         self.assertTrue(status.structured_content["ok"])

@@ -762,7 +762,122 @@ class AgentTaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(degraded["failure"]["unresolved_tools"], [])
 
         task["failure"] = "not-a-dict"
-        self.assertEqual((await tasks.aoitalk_agent_task_status(task_id))["error"], "invalid_response")
+        malformed = await tasks.aoitalk_agent_task_status(task_id)
+        self.assertEqual(malformed["status"], "failed")
+        self.assertNotIn("failure", malformed)
+
+    async def test_failure_diagnostics_match_on_both_status_paths_and_are_bounded(self):
+        started = await legacy_tasks.aoitalk_local_task_start(
+            "diagnostic regression", WORKSPACE, mode="read_only", allow_commands=False,
+            idempotency_key="diagnostic-regression", agent_id=AGENT_ID,
+        )
+        task_id = started["task_id"]
+        task = self.api.tasks[task_id]
+        task.update(
+            status="failed", is_terminal=True,
+            failure={
+                "reason": "provider_protocol_error",
+                "successful_tool_count": 20,
+                "successful_tools": ["read_file", "search_files", "list_directory"],
+                "unresolved_tools": [{
+                    "tool": "read_file", "reason": "provider_protocol_error", "denied": True,
+                    "receipt_id": "receipt-id-1", "arguments": {"api_key": PASSWORD},
+                    "output": "private-tool-output",
+                }],
+                "final_response": "unbounded failure detail " + "x" * 100_000,
+            },
+            tool_failures={
+                "diagnostic_count": 1,
+                "diagnostic": [{
+                    "tool": "search_files", "reason": "diagnostic_warning", "denied": False,
+                    "receipt_id": "diagnostic-receipt-1", "arguments": {"api_key": PASSWORD},
+                    "output": "private-diagnostic-output",
+                }],
+                "refused_count": 1,
+                "refused": [{
+                    "tool": "read_file", "reason": "permission_denied", "denied": True,
+                    "receipt_id": "refused-receipt-1", "arguments": {"password": PASSWORD},
+                    "output": "private-refusal-output",
+                }],
+                "recovered_count": 17, "unresolved_count": 0,
+                "recovered": [{
+                    "tool": "search_files", "reason": "tool_recovered", "denied": False,
+                    "receipt_id": "receipt-id-2", "arguments": {"password": PASSWORD},
+                    "output": "private-recovery-output",
+                }],
+                "unresolved": [],
+                "oversized_count": 10 ** 50,
+                "private_details": {"api_key": PASSWORD},
+            },
+            result={"final_response": "large answer " + "z" * 200_000},
+        )
+
+        direct = await tasks.aoitalk_agent_task_status(task_id)
+        local = await legacy_tasks.aoitalk_local_task_status(task_id)
+        expected_failure = {
+            "reason": "provider_protocol_error",
+            "unresolved_tools": [{
+                "tool": "read_file", "reason": "provider_protocol_error", "denied": True,
+                "receipt_id": "receipt-id-1",
+            }],
+            "successful_tool_count": 20,
+            "successful_tools": ["read_file", "search_files", "list_directory"],
+        }
+        expected_tool_failures = {
+            "diagnostic_count": 1,
+            "diagnostic": [{
+                "tool": "search_files", "reason": "diagnostic_warning", "denied": False,
+                "receipt_id": "diagnostic-receipt-1",
+            }],
+            "refused_count": 1,
+            "refused": [{
+                "tool": "read_file", "reason": "permission_denied", "denied": True,
+                "receipt_id": "refused-receipt-1",
+            }],
+            "recovered_count": 17, "unresolved_count": 0,
+            "recovered": [{
+                "tool": "search_files", "reason": "tool_recovered", "denied": False,
+                "receipt_id": "receipt-id-2",
+            }],
+        }
+        for status in (direct, local):
+            self.assertEqual(status["status"], "failed")
+            self.assertEqual(status["failure"], expected_failure)
+            self.assertEqual(status["tool_failures"], expected_tool_failures)
+            encoded = json.dumps(status, ensure_ascii=False)
+            self.assertNotIn(PASSWORD, encoded)
+            self.assertNotIn("private-tool-output", encoded)
+            self.assertNotIn("private-recovery-output", encoded)
+            self.assertNotIn("private-diagnostic-output", encoded)
+            self.assertNotIn("private-refusal-output", encoded)
+            self.assertNotIn("private_details", encoded)
+            self.assertLessEqual(len(encoded.encode("utf-8")), tasks.MAX_OUTPUT_BYTES)
+        self.assertEqual(direct["failure"], local["failure"])
+        self.assertEqual(direct["tool_failures"], local["tool_failures"])
+        TypeAdapter(TaskReply).validate_python(direct)
+        LegacyTaskReply = importlib.import_module("home_mcp_gateway.aoitalk_task_schema").TaskReply
+        TypeAdapter(LegacyTaskReply).validate_python(local)
+        self.assertIn(f"/api/agent-tasks/{task_id}", [call["path"] for call in self.api.calls])
+
+        # Optional malformed/oversize details are dropped while the failed state
+        # and independently valid diagnostics remain readable on both routes.
+        task["failure"] = {"reason": "r" * 97 + PASSWORD, "successful_tools": ["s" * 81]}
+        task["tool_failures"] = {
+            "recovered_count": "17",
+            "unresolved": [{"tool": [PASSWORD], "reason": "q" * 500, "denied": True,
+                            "receipt_id": "not a safe receipt"}],
+        }
+        direct_malformed = await tasks.aoitalk_agent_task_status(task_id)
+        local_malformed = await legacy_tasks.aoitalk_local_task_status(task_id)
+        for status in (direct_malformed, local_malformed):
+            self.assertEqual(status["status"], "failed")
+            self.assertEqual(status["failure"]["reason"], None)
+            self.assertEqual(status["failure"]["successful_tools"], [])
+            self.assertNotIn("recovered_count", status["tool_failures"])
+            encoded = json.dumps(status, ensure_ascii=False)
+            self.assertNotIn(PASSWORD, encoded)
+            self.assertNotIn("r" * 97, encoded)
+            self.assertNotIn("q" * 100, encoded)
 
     async def test_cancel_is_only_a_request_until_status_confirms_stop(self):
         started = await self.start(idempotency_key="cancel-task")
@@ -1369,6 +1484,117 @@ class AgentTaskTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(result["error"], "invalid_input")
                     self.assertIn("requires_command_verification", result["detail"])
                     self.assertFalse(self.api.calls)
+    async def test_execution_options_omitted_null_absent_explicit_exact(self):
+        for index, extra in enumerate(({}, {"execution_profile_id": None, "tool_generation_max_tokens": None,
+                                            "timeout_sec": None, "command_timeout_sec": None})):
+            self.api.calls.clear()
+            result = await self.start(idempotency_key=f"eo-none-{index}", **extra)
+            self.assertTrue(result["ok"], result)
+            body = self.posts()[0]["body"]
+            for name in EXEC_OPTIONS:
+                self.assertNotIn(name, body)
+        for index, values in enumerate((
+            {"execution_profile_id": "p", "tool_generation_max_tokens": 1, "timeout_sec": 1, "command_timeout_sec": 1},
+            {"execution_profile_id": "x" * 64, "tool_generation_max_tokens": 4096, "timeout_sec": 3600,
+             "command_timeout_sec": 900},
+        )):
+            self.api.calls.clear()
+            result = await self.start(idempotency_key=f"eo-val-{index}", **values)
+            self.assertTrue(result["ok"], result)
+            post = self.posts()[0]
+            self.assertEqual({k: post["body"][k] for k in EXEC_OPTIONS}, values)
+            self.assertEqual(post["path"], "/api/agent-tasks")
+            self.assertEqual(post["headers"].get("idempotency-key", post["headers"].get("Idempotency-Key")),
+                             f"eo-val-{index}") if "headers" in post else None
+
+    async def test_execution_options_invalid_values_make_no_http_calls(self):
+        bad = {
+            "execution_profile_id": ("", "x" * 65, 5, True, " ", "a\nb"),
+            "tool_generation_max_tokens": (True, "5", 5.0, 0, -1, 4097),
+            "timeout_sec": (True, "5", 5.0, 0, -1, 3601),
+            "command_timeout_sec": (True, "5", 5.0, 0, -1, 901),
+        }
+        for name, values in bad.items():
+            for value in values:
+                with self.subTest(name=name, value=value):
+                    self.api.calls.clear()
+                    result = await self.start(idempotency_key="eo-bad", **{name: value})
+                    self.assertEqual(result["error"], "invalid_input")
+                    self.assertFalse(self.api.calls)
+
+    def test_execution_options_mcp_input_schema_from_signature(self):
+        from mcp.server.mcpserver.tools import Tool
+        props = Tool.from_function(tasks.aoitalk_agent_task_start).parameters["properties"]
+        self.assertEqual(props["execution_profile_id"]["anyOf"][0]["minLength"], 1)
+        self.assertEqual(props["execution_profile_id"]["anyOf"][0]["maxLength"], 64)
+        for name, upper in (("tool_generation_max_tokens", 4096), ("timeout_sec", 3600),
+                            ("command_timeout_sec", 900)):
+            branch = props[name]["anyOf"][0]
+            self.assertEqual((branch["type"], branch["minimum"], branch["maximum"]), ("integer", 1, upper))
+            self.assertIsNone(props[name]["default"])
+        legacy = Tool.from_function(legacy_tasks.aoitalk_local_task_start).parameters["properties"]
+        self.assertEqual(legacy["tool_generation_max_tokens"]["anyOf"][0]["maximum"], 4096)
+        self.assertEqual(legacy["timeout_sec"]["anyOf"][0]["maximum"], 86400)
+
+    async def test_facade_tool_run_boundary_keeps_timeouts_strict(self):
+        from mcp.server.mcpserver.tools import Tool
+        tool = Tool.from_function(legacy_tasks.aoitalk_local_task_start)
+        base = {"goal": "g", "workspace": WORKSPACE, "agent_id": AGENT_ID}
+        for name in ("timeout_sec", "command_timeout_sec"):
+            for value in (True, "5", 5.0):
+                with self.subTest(name=name, value=value):
+                    self.api.calls.clear()
+                    with self.assertRaises(Exception):
+                        await tool.run({**base, "idempotency_key": "tr-bad", name: value}, None)
+                    self.assertFalse(self.posts())
+            self.api.calls.clear()
+            ok = await tool.run({**base, "idempotency_key": "tr-ok", name: 5}, None)
+            self.assertIs(self.posts()[0]["body"][name], 5)
+        self.api.calls.clear()
+        await tool.run({"goal": "g", "workspace": WORKSPACE, "idempotency_key": "tr-legacy",
+                        "timeout_sec": 86400, "command_timeout_sec": 86400}, None)
+        self.assertEqual(self.posts()[0]["path"], "/api/local-agent/tasks")
+
+    async def test_facade_execution_options_canonical_forward_and_legacy_behavior(self):
+        values = {"execution_profile_id": "ep1", "tool_generation_max_tokens": 512,
+                  "timeout_sec": 600, "command_timeout_sec": 60}
+        started = await legacy_tasks.aoitalk_local_task_start(
+            "facade goal", WORKSPACE, agent_id=AGENT_ID, idempotency_key="eo-facade", **values)
+        self.assertTrue(started["ok"], started)
+        post = self.posts()[0]
+        self.assertEqual(post["path"], "/api/agent-tasks")
+        self.assertEqual({k: post["body"][k] for k in EXEC_OPTIONS}, values)
+        for name, value in (("timeout_sec", 3601), ("command_timeout_sec", 901)):
+            self.api.calls.clear()
+            result = await legacy_tasks.aoitalk_local_task_start(
+                "facade goal", WORKSPACE, agent_id=AGENT_ID, idempotency_key="eo-facade-bad", **{name: value})
+            self.assertEqual(result["error"], "invalid_input")
+            self.assertFalse(self.api.calls)
+        self.api.calls.clear()
+        rounds = await legacy_tasks.aoitalk_local_task_start(
+            "facade goal", WORKSPACE, agent_id=AGENT_ID, idempotency_key="eo-rounds", max_tool_rounds=3)
+        self.assertEqual(rounds["error"], "invalid_input")
+        self.assertFalse(self.api.calls)
+        for kwargs in ({}, {"agent_id": AGENT_ID, "provider": "openai_compatible_local"}):
+            for name in ("execution_profile_id", "tool_generation_max_tokens"):
+                with self.subTest(kwargs=list(kwargs), name=name):
+                    self.api.calls.clear()
+                    result = await legacy_tasks.aoitalk_local_task_start(
+                        "legacy goal", WORKSPACE, idempotency_key="eo-legacy",
+                        **{name: values[name]}, **kwargs)
+                    self.assertEqual(result["error"], "invalid_input")
+                    self.assertIn(name, result["detail"])
+                    self.assertFalse(self.api.calls)
+        self.api.calls.clear()
+        legacy = await legacy_tasks.aoitalk_local_task_start(
+            "legacy goal", WORKSPACE, idempotency_key="eo-legacy-ok", timeout_sec=86400, command_timeout_sec=7200)
+        self.assertTrue(legacy["ok"], legacy)
+        post = self.posts()[0]
+        self.assertEqual(post["path"], "/api/local-agent/tasks")
+        self.assertEqual((post["body"]["timeout_sec"], post["body"]["command_timeout_sec"]), (86400, 7200))
+
+
+EXEC_OPTIONS = ("execution_profile_id", "tool_generation_max_tokens", "timeout_sec", "command_timeout_sec")
 
 
 if __name__ == "__main__":

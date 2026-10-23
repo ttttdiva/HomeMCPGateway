@@ -16,9 +16,10 @@ import uuid
 from typing import Annotated, Any, Literal
 
 import httpx
-from pydantic import Field, StrictBool
+from pydantic import Field, StrictBool, StrictInt
 
-from . import aoitalk
+from . import aoitalk, aoitalk_auth
+from .aoitalk_task_diagnostics import project_diagnostics
 
 TASK_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -104,8 +105,11 @@ SERVER_DETAIL_LIMIT = 300
 
 class AgentTaskError(Exception):
     def __init__(self, code: str, http_status: int | None = None, *,
-                 server_code: str | None = None, server_detail: str | None = None):
+                 server_code: str | None = None, server_detail: str | None = None,
+                 retry_after: int | None = None, local_hold: int | None = None):
         super().__init__(MESSAGES.get(code, MESSAGES["server_error"]))
+        self.retry_after = retry_after
+        self.local_hold = local_hold
         self.code = code if code in MESSAGES else "server_error"
         self.http_status = http_status
         self.server_code = server_code
@@ -118,6 +122,10 @@ def _error(exc: AgentTaskError, **state: Any) -> dict[str, Any]:
         result["http_status"] = exc.http_status
         # Distinguish a refusal the server named from one inferred from the HTTP status alone.
         result["error_source"] = "server_error_code" if exc.server_code else "http_status_only"
+    if exc.retry_after is not None:
+        result["retry_after_seconds"] = exc.retry_after
+    if exc.local_hold is not None:
+        result["local_cooldown_seconds"] = exc.local_hold
     if exc.server_code:
         result["server_error_code"] = exc.server_code
     if exc.server_detail:
@@ -132,6 +140,7 @@ class AgentTaskClient(aoitalk.Client):
         try:
             async with self.http.stream(method, path, **kwargs) as response:
                 status = response.status_code
+                response_headers = response.headers
                 raw = bytearray()
                 async for part in response.aiter_bytes():
                     raw.extend(part)
@@ -169,14 +178,20 @@ class AgentTaskClient(aoitalk.Client):
             if status == 403 and isinstance(raw_detail, str):
                 clean = SECRET_VALUE.sub("[redacted]", raw_detail)
                 server_detail = aoitalk._safe_text(clean, self.settings, SERVER_DETAIL_LIMIT) or None
-        raise AgentTaskError(code, status, server_code=server_code, server_detail=server_detail)
+        retry_after = aoitalk.parse_retry_after(response_headers.get("retry-after")) if status == 429 else None
+        raise AgentTaskError(code, status, server_code=server_code, server_detail=server_detail,
+                             retry_after=retry_after)
 
     async def login_task(self) -> None:
         try:
             await self.login()
         except aoitalk.ClipError as exc:
-            code = exc.code if exc.code in MESSAGES else "server_error"
-            raise AgentTaskError(code, exc.http_status) from None
+            raise _task_error(exc) from None
+
+
+def _task_error(exc: aoitalk.ClipError) -> AgentTaskError:
+    return AgentTaskError(exc.code if exc.code in MESSAGES else "server_error", exc.http_status,
+                          retry_after=exc.retry_after, local_hold=exc.local_hold)
 
 
 async def _session(fn, *, sanitize: bool = True):
@@ -184,13 +199,10 @@ async def _session(fn, *, sanitize: bool = True):
         settings = aoitalk.load_settings()
     except aoitalk.ClipError:
         raise AgentTaskError("configuration_error") from None
-    client = AgentTaskClient(settings)
-    try:
-        await client.login_task()
+    async with aoitalk_auth.client_for(AgentTaskClient, settings, lambda c: c.login_task(), _task_error,
+                                       lambda e: isinstance(e, AgentTaskError) and e.http_status == 401) as client:
         result = await fn(client)
         return _sanitize(result, settings) if sanitize else result
-    finally:
-        await client.http.aclose()
 
 
 def _number(value: Any, low: float, high: float, name: str) -> float:
@@ -272,6 +284,9 @@ def _status(task: Any, *, expected_id: str | None = None) -> dict[str, Any]:
     if not isinstance(status, str) or not STATUS_RE.fullmatch(status):
         raise AgentTaskError("invalid_response")
     result = {"task_id": task_id, "status": status}
+    # Put bounded diagnostics ahead of potentially large progress/result fields
+    # so they survive the shared output budget.
+    result.update(project_diagnostics(task))
     for key in ("work_item_id", "agent_run_id", "agent_id", "agent_revision_id"):
         value = task.get(key)
         if value is not None:
@@ -291,46 +306,7 @@ def _status(task: Any, *, expected_id: str | None = None) -> dict[str, Any]:
                        "summary_text", "failure_reason", "failure_detail"} and not isinstance(task[key], str):
                 raise AgentTaskError("invalid_response")
             result[key] = task[key]
-    if task.get("failure") is not None:
-        result["failure"] = _failure(task["failure"])
     return result
-
-
-def _failure(value: Any) -> dict[str, Any]:
-    """Rebuild 41's failure summary from an allowlist.
-
-    Only framework-authored codes and tool names are kept; tool arguments and
-    output are never copied. Optional details are clipped or dropped instead of
-    raising, so a malformed detail never hides that the task failed.
-    """
-    if not isinstance(value, dict):
-        raise AgentTaskError("invalid_response")
-
-    def code(item: Any, limit: int = 160) -> str | None:
-        # Over-long values are dropped, not clipped: a clipped secret would
-        # no longer match _sanitize's exact-match redaction.
-        if not isinstance(item, str) or len(item) > limit:
-            return None
-        return "".join(c for c in item if ord(c) >= 32)
-
-    def names(item: Any) -> list[str]:
-        if not isinstance(item, list):
-            return []
-        return [name for name in (code(entry, 80) for entry in item[:50]) if name]
-
-    unresolved = []
-    entries = value.get("unresolved_tools")
-    for entry in (entries[:50] if isinstance(entries, list) else []):
-        if isinstance(entry, dict):
-            unresolved.append({"tool": code(entry.get("tool"), 80), "denied": entry.get("denied") is True,
-                               "reason": code(entry.get("reason"))})
-    count = value.get("successful_tool_count")
-    return {
-        "reason": code(value.get("reason"), 96),
-        "unresolved_tools": unresolved,
-        "successful_tool_count": count if isinstance(count, int) and not isinstance(count, bool) else 0,
-        "successful_tools": names(value.get("successful_tools")),
-    }
 
 
 def _redact_result_text(value: str, settings: aoitalk.Settings) -> str:
@@ -461,6 +437,10 @@ async def aoitalk_agent_task_start(
     edit_targets: Annotated[list[Annotated[str, Field(min_length=1, max_length=512)]] | None,
                             Field(max_length=20)] = None,
     requires_command_verification: StrictBool | None = None,
+    execution_profile_id: Annotated[str | None, Field(min_length=1, max_length=64)] = None,
+    tool_generation_max_tokens: Annotated[StrictInt | None, Field(ge=1, le=4096)] = None,
+    timeout_sec: Annotated[StrictInt | None, Field(ge=1, le=3600)] = None,
+    command_timeout_sec: Annotated[StrictInt | None, Field(ge=1, le=900)] = None,
 ) -> dict[str, Any]:
     """Submit a generic AoiTalk Agent task and return its task_id immediately.
 
@@ -486,6 +466,11 @@ async def aoitalk_agent_task_start(
     the last file edit, so true with allow_commands=false is contradictory and
     AoiTalk rejects it (422). false declares a genuinely static/file-based
     verification task; it is not a claim that tests were run.
+    execution_profile_id (1-64 chars) selects an execution profile only; it
+    does not change the Agent role or permissions, and provider/model/effort
+    remain route assertions. tool_generation_max_tokens (1-4096),
+    timeout_sec (1-3600) and command_timeout_sec (1-900) are strict integers;
+    omitted/None sends nothing and explicit values are forwarded exactly.
     """
     key = ""
     state: dict[str, Any] = {}
@@ -516,11 +501,24 @@ async def aoitalk_agent_task_start(
             raise AgentTaskError("invalid_input")
         if edit_targets is not None:
             edit_targets = _required_outputs(edit_targets, "edit_targets")
+        if execution_profile_id is not None:
+            if (not isinstance(execution_profile_id, str) or not 1 <= len(execution_profile_id) <= 64
+                    or execution_profile_id != _text(execution_profile_id, "execution_profile_id", 64)):
+                raise AgentTaskError("invalid_input")
+        for value, upper in ((tool_generation_max_tokens, 4096), (timeout_sec, 3600),
+                             (command_timeout_sec, 900)):
+            if value is not None and (type(value) is not int or not 1 <= value <= upper):
+                raise AgentTaskError("invalid_input")
         body: dict[str, Any] = {
             "goal": goal, "workspace": workspace, "constraints": constraints,
             "completion_criteria": completion_criteria, "mode": mode,
             "allow_commands": allow_commands, "agent_id": agent_id,
         }
+        for name, value in (("execution_profile_id", execution_profile_id),
+                            ("tool_generation_max_tokens", tool_generation_max_tokens),
+                            ("timeout_sec", timeout_sec), ("command_timeout_sec", command_timeout_sec)):
+            if value is not None:
+                body[name] = value
         if allow_git_commit:
             body["allow_git_commit"] = True
         if allow_git_push:

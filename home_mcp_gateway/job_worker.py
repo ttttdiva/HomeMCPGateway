@@ -71,12 +71,15 @@ def main(directory: Path) -> None:
                 if data.get("dispatcher_binding") is not None:
                     try:
                         from home_mcp_gateway.work_dispatcher_codex import worker_launch_guard
-                        guard = worker_launch_guard(data["dispatcher_binding"], {
+                        launch_data = {
                             "command": data.get("command"), "cwd": data.get("cwd"),
                             "idempotency_key": data.get("idempotency_key"),
                             "request_fingerprint": data.get("request_fingerprint"),
                             "dispatcher_request_fingerprint": data.get("dispatcher_request_fingerprint"),
-                            "explicit_env_digest": data.get("explicit_env_digest")})
+                            "explicit_env_digest": data.get("explicit_env_digest")}
+                        if data.get("transport") == "codex_app_server":
+                            launch_data.update(transport=data["transport"], app_server=data.get("app_server"))
+                        guard = worker_launch_guard(data["dispatcher_binding"], launch_data)
                     except Exception:
                         guard = "unavailable"
                 if guard != "open":
@@ -89,6 +92,20 @@ def main(directory: Path) -> None:
                         data.update(status="unknown", launch_result="guard_unavailable", finished_at=time.time())
                     _save(path, data)
                     return
+            if data.get("transport") == "codex_app_server":
+                # The opt-in adapter never falls back to legacy exec on failure.
+                if not keyed or data.get("dispatcher_binding") is None:
+                    data.update(status="failed", error_code="appserver_unbound_launch", finished_at=time.time())
+                    _save(path, data)
+                    return
+                from home_mcp_gateway.codex_app_server_runtime import run_app_server, RuntimeFailure
+                try:
+                    run_app_server(directory, data, lambda value: _save(path, value))
+                except (RuntimeFailure, ValueError) as exc:
+                    data.update(status="failed", error_code=(exc.code if isinstance(exc, RuntimeFailure)
+                                else "appserver_spec_invalid"), finished_at=time.time())
+                    _save(path, data)
+                return
             proc = subprocess.Popen(data["command"], cwd=data["cwd"], shell=isinstance(data["command"], str),
                                     stdin=subprocess.DEVNULL, stdout=out, stderr=err,
                                     **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))

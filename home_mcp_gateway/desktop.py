@@ -573,15 +573,20 @@ def desktop_observe(
                 if after["bounds"] != info["bounds"]:
                     raise ValueError("stale_observation: window moved during observation; retry")
             metadata["timestamp"] = _now()
+            images = [block for block in capture.content if block.type == "image"] if capture else []
+            response = CallToolResult(
+                content=[TextContent(type="text", text=json.dumps(metadata, ensure_ascii=False)), *images],
+                structuredContent=metadata,
+            )
+            # Failed JSON/response construction must not publish an unusable ID
+            # or evict a previously returned observation from this process.
             _remember(identifier, dict(window=info, windows=metadata.get("windows", []),
                 foreground=foreground, monitors=monitors,
                 bounds=metadata.get("bounds"),
                 window_geometry=metadata.get("window_geometry"),
                 elements={e["ref"]: e for e in (uia or {}).get("elements", [])},
                 max_depth=max_depth, max_nodes=max_nodes, timestamp=metadata["timestamp"]))
-            images = [block for block in capture.content if block.type == "image"] if capture else []
-            return CallToolResult(content=[TextContent(type="text", text=json.dumps(metadata, ensure_ascii=False)), *images],
-                                  structuredContent=metadata)
+            return response
 
 
 def _action_response(result: dict, *, observe_after: bool, with_uia: bool) -> dict | CallToolResult:

@@ -69,6 +69,8 @@ class TaskFields(TypedDict, total=False):
     baseline: dict[str, Any] | None
     llm: dict[str, Any] | None
     is_terminal: bool | None
+    failure: dict[str, Any] | None
+    tool_failures: dict[str, Any] | None
     result: TaskResult | None
 
 
@@ -77,6 +79,8 @@ class BusinessReply(TypedDict, total=False):
     error: str
     message: str
     http_status: int
+    retry_after_seconds: int
+    local_cooldown_seconds: int
     detail: str
     output_truncated: bool
 

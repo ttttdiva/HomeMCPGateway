@@ -1,7 +1,9 @@
 param(
+    [ValidateSet('home-mcp', 'aoitalk')]
+    [string]$Target = 'home-mcp',
     [string]$TunnelId,
     [string]$Alias,
-    [string]$RuntimeKeyEnv = "CONTROL_PLANE_API_KEY",
+    [string]$RuntimeKeyEnv,
     [string]$EnvFile = (Join-Path (Split-Path -Parent $PSScriptRoot) ".env"),
     [switch]$Watch
 )
@@ -33,10 +35,49 @@ try {
             [Environment]::SetEnvironmentVariable($Name, $Value, 'Process')
         }
     }
-    if (-not $TunnelId) { $TunnelId = $env:CONTROL_PLANE_TUNNEL_ID }
-    if (-not $Alias) { $Alias = $env:TUNNEL_ALIAS }
-    if (-not $Alias) { $Alias = 'home-mcp' }
-    if (-not $TunnelId -or $TunnelId -eq 'tunnel_replace_me') { throw "Set CONTROL_PLANE_TUNNEL_ID in .env." }
+    if ($Target -eq 'aoitalk') {
+        $ConfiguredAoiTalkTunnelId = $env:HOME_MCP_AOITALK_TUNNEL_ID
+        if (-not $ConfiguredAoiTalkTunnelId -or $ConfiguredAoiTalkTunnelId -eq 'tunnel_replace_me') {
+            throw 'Set HOME_MCP_AOITALK_TUNNEL_ID in .env; the AoiTalk target never falls back to the home Tunnel ID.'
+        }
+        if ($TunnelId -and $TunnelId -ne $ConfiguredAoiTalkTunnelId) {
+            throw 'The explicit TunnelId does not match HOME_MCP_AOITALK_TUNNEL_ID.'
+        }
+        $TunnelId = $ConfiguredAoiTalkTunnelId
+        if ($env:CONTROL_PLANE_TUNNEL_ID -and $TunnelId -eq $env:CONTROL_PLANE_TUNNEL_ID) {
+            throw 'The home and AoiTalk targets must use different Tunnel IDs.'
+        }
+        $ConfiguredHomeAlias = if ($env:TUNNEL_ALIAS) { $env:TUNNEL_ALIAS } else { 'home-mcp' }
+        if ($ConfiguredHomeAlias -eq 'aoitalk') {
+            throw "The home TUNNEL_ALIAS cannot use the reserved AoiTalk alias/profile 'aoitalk'."
+        }
+        if ($RuntimeKeyEnv -and $RuntimeKeyEnv -notin @('HOME_MCP_AOITALK_RUNTIME_API_KEY', 'CONTROL_PLANE_API_KEY')) {
+            throw 'RuntimeKeyEnv must name the AoiTalk runtime key or the existing CONTROL_PLANE_API_KEY.'
+        }
+        if (-not $RuntimeKeyEnv) {
+            if ($env:HOME_MCP_AOITALK_RUNTIME_API_KEY) { $RuntimeKeyEnv = 'HOME_MCP_AOITALK_RUNTIME_API_KEY' }
+            else { $RuntimeKeyEnv = 'CONTROL_PLANE_API_KEY' }
+        }
+        if ($Alias -and $Alias -ne 'aoitalk') { throw "The AoiTalk target uses alias/profile 'aoitalk'." }
+        $Alias = 'aoitalk'
+        $McpEntry = Join-Path $PSScriptRoot 'aoitalk_plugin_stdio.py'
+        $RuntimeRoot = Join-Path $Root '.runtime\aoitalk'
+    } else {
+        if (-not $TunnelId) { $TunnelId = $env:CONTROL_PLANE_TUNNEL_ID }
+        if (-not $Alias) { $Alias = $env:TUNNEL_ALIAS }
+        if (-not $Alias) { $Alias = 'home-mcp' }
+        if (-not $RuntimeKeyEnv) { $RuntimeKeyEnv = 'CONTROL_PLANE_API_KEY' }
+        if ($Alias -eq 'aoitalk') { throw "The home target cannot use the reserved AoiTalk alias/profile 'aoitalk'." }
+        if ($env:HOME_MCP_AOITALK_TUNNEL_ID -and $TunnelId -eq $env:HOME_MCP_AOITALK_TUNNEL_ID) {
+            throw 'The home and AoiTalk targets must use different Tunnel IDs.'
+        }
+        $McpEntry = Join-Path $PSScriptRoot 'gateway_stdio.py'
+        $RuntimeRoot = Join-Path $Root '.runtime'
+    }
+    if (-not $TunnelId -or $TunnelId -eq 'tunnel_replace_me') {
+        $TunnelVariable = if ($Target -eq 'aoitalk') { 'HOME_MCP_AOITALK_TUNNEL_ID' } else { 'CONTROL_PLANE_TUNNEL_ID' }
+        throw "Set $TunnelVariable in .env."
+    }
     $RuntimeKey = [Environment]::GetEnvironmentVariable($RuntimeKeyEnv, 'Process')
     if (-not $RuntimeKey -or $RuntimeKey -eq 'replace_me') { throw "Set $RuntimeKeyEnv in .env." }
     if (-not (Test-Path -LiteralPath $Python)) { throw "Run scripts\setup_windows.ps1 first." }
@@ -56,13 +97,21 @@ try {
 
     # tunnel-client parses this command with shell quoting; forward slashes avoid
     # Windows backslashes being consumed as escape characters.
-    $McpCommand = '"' + $Python.Replace('\', '/') + '" "' + (Join-Path $PSScriptRoot 'gateway_stdio.py').Replace('\', '/') + '"'
+    $McpCommand = '"' + $Python.Replace('\', '/') + '" "' + $McpEntry.Replace('\', '/') + '"'
     $ProfileDir = Join-Path $Root '.runtime\profiles'
+    $SupervisorStatusPath = Join-Path $RuntimeRoot 'supervisor-status.json'
+    $SupervisorLogPath = Join-Path $RuntimeRoot 'supervisor.log'
+    if ($Target -eq 'aoitalk') {
+        if (-not $SavedEnvironment.ContainsKey('HOME_MCP_TOOL_LOG_DIR')) {
+            $SavedEnvironment['HOME_MCP_TOOL_LOG_DIR'] = [Environment]::GetEnvironmentVariable('HOME_MCP_TOOL_LOG_DIR', 'Process')
+        }
+        [Environment]::SetEnvironmentVariable('HOME_MCP_TOOL_LOG_DIR', (Join-Path $RuntimeRoot 'tool_logs'), 'Process')
+    }
     Push-Location $Root
     try {
         $Failures = 0
         $NeedsConnect = $true
-        New-Item -ItemType Directory -Path (Join-Path $Root '.runtime') -Force | Out-Null
+        New-Item -ItemType Directory -Path $RuntimeRoot -Force | Out-Null
         do {
             try {
                 if ($NeedsConnect) {
@@ -84,7 +133,7 @@ try {
                     runtime_pid = $Status.process.pid
                     ui_url = $Status.ui_url
                 }
-                $Snapshot | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Root '.runtime\supervisor-status.json') -Encoding UTF8
+                $Snapshot | ConvertTo-Json | Set-Content -LiteralPath $SupervisorStatusPath -Encoding UTF8
                 if ($Status.process_running -and $Status.healthy -and $Status.ready) {
                     $Failures = 0
                 } elseif (-not $Watch) {
@@ -102,7 +151,7 @@ try {
                 if (-not $Watch) { throw }
                 # Do not write native output, credentials, or exception bodies to the watchdog log.
                 $Note = '{0} Runtime check/connect failed; retrying in 30 seconds.' -f [DateTimeOffset]::Now.ToString('o')
-                Add-Content -LiteralPath (Join-Path $Root '.runtime\supervisor.log') -Value $Note
+                Add-Content -LiteralPath $SupervisorLogPath -Value $Note
                 $NeedsConnect = $true
                 Start-Sleep -Seconds 30
             }

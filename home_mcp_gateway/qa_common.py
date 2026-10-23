@@ -11,6 +11,7 @@ from typing import Annotated, Any, get_args, get_type_hints
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, ImageContent, TextContent
 from PIL import Image
+from pydantic import ConfigDict, create_model
 
 from .telemetry import instrument_tool
 
@@ -73,4 +74,19 @@ def register_tools(server: Any, functions: list) -> None:
             invoke.__signature__ = signature
             invoke.__annotations__ = hints
             return invoke
-        server.tool()(instrument_tool(wrap(fn)))
+        wrapped = instrument_tool(wrap(fn))
+        if fn.__module__ == "home_mcp_gateway.jobs" and fn.__name__ in {"job_steer", "job_steer_status"}:
+            # These public steering boundaries must reject launch/runtime
+            # overrides. The SDK's default argument model silently ignores
+            # extras, so constrain only these registrations, including their
+            # advertised schemas. Do not change the SDK's global tool factory.
+            tool = server._tool_manager.add_tool(wrapped)
+            arguments = tool.fn_metadata.arg_model
+            strict_arguments = create_model(
+                arguments.__name__, __base__=arguments,
+                __config__=ConfigDict(extra="forbid"),
+            )
+            tool.fn_metadata.arg_model = strict_arguments
+            tool.parameters = strict_arguments.model_json_schema(by_alias=True)
+        else:
+            server.tool()(wrapped)

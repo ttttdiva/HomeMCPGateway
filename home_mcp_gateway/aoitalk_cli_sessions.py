@@ -10,19 +10,32 @@ from __future__ import annotations
 import json
 import math
 import re
+import unicodedata
 from typing import Annotated, Any, Literal
 
 import httpx
 from pydantic import Field
 
-from . import aoitalk
+from . import aoitalk, aoitalk_auth
 
 
 SESSION_ID_PATTERN = r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
 SESSION_ID_RE = re.compile(SESSION_ID_PATTERN)
 CURSOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~:/+=-]{0,511}$")
-PROVIDERS = {"codex-cli", "claude-cli", "grok-cli", "antigravity-cli"}
+MUSE_REMOTE_PROVIDER = "muse-remote"
+MUSE_REMOTE_EXECUTION_TARGET = "remote_muse"
+MUSE_REMOTE_SANDBOX = "remote_uncontrolled"
+PROVIDERS = {"codex-cli", "claude-cli", "grok-cli", "antigravity-cli", MUSE_REMOTE_PROVIDER}
+REMOTE_UNSUPPORTED_CREATE_FIELDS = frozenset({
+    "working_directory",
+    "permission_mode",
+    "allowed_capabilities",
+    "model",
+    "effort",
+})
+_MISSING = object()
 PERMISSION_MODES = {"native_default", "standard", "accept_edits"}
+ROLE_CONTEXT_MODES = {"raw", "agent_role"}
 CLI_CAPABILITIES = ("command_execute", "workspace_read", "workspace_write")
 PRIVATE_HANDLE_KEYS = frozenset({
     "native_handle",
@@ -31,6 +44,35 @@ PRIVATE_HANDLE_KEYS = frozenset({
     "continuation_handle",
     "provider_session_id",
     "conversation_id",
+})
+REMOTE_PATH_KEYS = frozenset({
+    "allowed_roots",
+    "cache_root",
+    "cwd",
+    "file_path",
+    "local_path",
+    "path",
+    "provider_cache_root",
+    "project_path",
+    "repository_path",
+    "root",
+    "state_root",
+    "working_directory",
+    "workspace_path",
+})
+REMOTE_ROLE_BODY_KEYS = frozenset({
+    "input_text",
+    "managed_role_context",
+    "mission",
+    "operational_instructions",
+    "prompt",
+    "raw_prompt",
+    "responsibility_summary",
+    "role_body",
+    "role_context",
+    "role_prompt",
+    "role_text",
+    "system_prompt",
 })
 SESSION_STATUSES = {
     "ready", "queued", "running", "completed", "failed", "waiting_input",
@@ -45,6 +87,10 @@ SAFE_ERROR_CODES = {
     "agent_not_configured",
     "agent_not_found",
     "agent_revision_missing",
+    "agent_revision_stale",
+    "agent_revision_pin_unavailable",
+    "agent_revision_binding_required",
+    "agent_revision_id_invalid",
     "agent_route_mismatch",
     "agent_scope_invalid",
     "agent_selection_denied",
@@ -76,6 +122,9 @@ SAFE_ERROR_CODES = {
     "reconnect_required",
     "server_error",
     "session_busy",
+    "session_admission_incomplete",
+    "session_admission_storage_error",
+    "session_admission_unavailable",
     "session_not_active",
     "session_not_found",
     "cancelled",
@@ -128,6 +177,10 @@ SAFE_ERROR_CODES = {
     "working_directory_outside_allowed_root",
     "working_directory_reparse_denied",
     "working_directory_unavailable",
+    "role_context_mode_invalid",
+    "role_context_invalid",
+    "agent_role_context_unavailable",
+    "agent_role_context_mismatch",
 }
 
 MESSAGES = {
@@ -135,6 +188,10 @@ MESSAGES = {
     "agent_not_configured": "委譲先Agentが設定されていません。",
     "agent_not_found": "指定したAgentが見つかりません。",
     "agent_revision_missing": "指定したAgentの公開revisionが見つかりません。",
+    "agent_revision_stale": "指定したAgent revisionが現在の権限と一致しません。",
+    "agent_revision_pin_unavailable": "Agent revisionを固定できません。",
+    "agent_revision_binding_required": "Agent revisionに対応するbindingが必要です。",
+    "agent_revision_id_invalid": "agent_revision_idが無効です。",
     "agent_route_mismatch": "provider/model/effortがAgentの正準routeと一致しません。",
     "agent_scope_invalid": "Agentの実行scopeを検証できません。",
     "agent_selection_denied": "Agentの選択権限を確認してください。",
@@ -166,6 +223,9 @@ MESSAGES = {
     "reconnect_required": "既存のCLI継続を再接続する必要があります。",
     "server_error": "AoiTalkのAPIがエラーを返しました。AoiTalk側のログを確認してください。",
     "session_busy": "CLIセッションは別の生成で使用中です。状態とeventsを確認してください。",
+    "session_admission_incomplete": "CLIセッションの受け入れ状態が完了していません。",
+    "session_admission_storage_error": "CLIセッションの受け入れ状態を保存できません。",
+    "session_admission_unavailable": "CLIセッションの受け入れ状態を確認できません。",
     "session_not_active": "CLIセッションはactiveではありません。statusを確認してください。",
     "session_not_found": "指定したCLIセッションが見つかりません。",
     "cancelled": "CLIセッションの取消要求を受け付けました。終端状態を確認してください。",
@@ -218,12 +278,19 @@ MESSAGES = {
     "working_directory_outside_allowed_root": "working_directoryが許可root外です。",
     "working_directory_reparse_denied": "reparse pathは許可されません。",
     "working_directory_unavailable": "working_directoryを利用できません。",
+    "role_context_mode_invalid": "role_context_modeが無効です。",
+    "role_context_invalid": "Agent role contextが無効です。",
+    "agent_role_context_unavailable": "Agent role contextを利用できません。",
+    "agent_role_context_mismatch": "Agent role contextが固定済み内容と一致しません。",
 }
 
 
 class CliSessionError(Exception):
     def __init__(self, code: str, http_status: int | None = None, detail: str | None = None,
-                 *, uncertain: bool = False):
+                 *, uncertain: bool = False, retry_after: int | None = None,
+                 local_hold: int | None = None):
+        self.retry_after = retry_after
+        self.local_hold = local_hold
         self.code = code if code in MESSAGES else "server_error"
         self.http_status = http_status
         self.detail = detail
@@ -240,6 +307,10 @@ def _error(exc: CliSessionError, **state: Any) -> dict[str, Any]:
     }
     if exc.http_status is not None:
         result["http_status"] = exc.http_status
+    if exc.retry_after is not None:
+        result["retry_after_seconds"] = exc.retry_after
+    if exc.local_hold is not None:
+        result["local_cooldown_seconds"] = exc.local_hold
     if exc.detail:
         result["detail"] = exc.detail
     return result
@@ -292,6 +363,7 @@ class CliSessionClient(aoitalk.Client):
         try:
             async with self.http.stream(method, path, **kwargs) as response:
                 status = response.status_code
+                response_headers = response.headers
                 raw = b""
                 async for part in response.aiter_bytes():
                     raw += part
@@ -335,13 +407,19 @@ class CliSessionClient(aoitalk.Client):
                 fields = sorted({".".join(str(p) for p in item.get("loc", [])[1:])
                                  for item in raw_detail if isinstance(item, dict)})
                 detail = "invalid fields: " + ", ".join(fields[:10])
-        raise CliSessionError(code, status, detail)
+        retry_after = aoitalk.parse_retry_after(response_headers.get("retry-after")) if status == 429 else None
+        raise CliSessionError(code, status, detail, retry_after=retry_after)
 
     async def login_cli_session(self) -> None:
         try:
             await self.login()
         except aoitalk.ClipError as exc:
-            raise CliSessionError(exc.code, exc.http_status) from None
+            raise _session_error(exc) from None
+
+
+def _session_error(exc: aoitalk.ClipError) -> CliSessionError:
+    return CliSessionError(exc.code, exc.http_status, retry_after=exc.retry_after,
+                           local_hold=exc.local_hold)
 
 
 async def _session(fn):
@@ -349,12 +427,10 @@ async def _session(fn):
         settings = aoitalk.load_settings()
     except aoitalk.ClipError:
         raise CliSessionError("configuration_error") from None
-    client = CliSessionClient(settings)
-    try:
-        await client.login_cli_session()
+    async with aoitalk_auth.client_for(CliSessionClient, settings, lambda c: c.login_cli_session(),
+                                       _session_error,
+                                       lambda e: isinstance(e, CliSessionError) and e.http_status == 401) as client:
         return _sanitize(await fn(client), settings)
-    finally:
-        await client.http.aclose()
 
 
 def _safe_key(value: Any) -> str | None:
@@ -362,8 +438,125 @@ def _safe_key(value: Any) -> str | None:
         return None
     if value.casefold() in PRIVATE_HANDLE_KEYS:
         return None
-    if re.search(r"(?i)(?:password|passwd|cookie|authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|secret|lease|native_session|provider_args|environment)", value):
+    if re.search(
+        r"(?i)(?:password|passwd|cookie|authorization|api[_-]?key|access[_-]?token|"
+        r"refresh[_-]?token|secret|lease|native_session|provider_args|environment|"
+        r"credential(?:[_-]?ref)?|auth[_-]?fingerprint)",
+        value,
+    ):
         return None
+    return value
+
+
+def _metadata_code(value: Any, *, limit: int = 96) -> str | None:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,%d}" % limit, value):
+        return None
+    return value
+
+
+def _remote_safety_metadata(value: Any, *, provider_hint: str | None = None) -> tuple[bool, dict[str, Any]]:
+    """Find server-owned remote safety facts without inspecting body values."""
+
+    remote = provider_hint == MUSE_REMOTE_PROVIDER
+    metadata: dict[str, Any] = {}
+    pending: list[tuple[Any, int]] = [(value, 0)]
+    while pending:
+        item, depth = pending.pop()
+        if depth > 8:
+            continue
+        if isinstance(item, dict):
+            provider = item.get("provider")
+            target = _metadata_code(item.get("execution_target"))
+            sandbox = _metadata_code(item.get("sandbox"))
+            if isinstance(provider, str) and provider.casefold() == MUSE_REMOTE_PROVIDER:
+                remote = True
+            if target in {MUSE_REMOTE_EXECUTION_TARGET, MUSE_REMOTE_PROVIDER}:
+                remote = True
+            if sandbox == MUSE_REMOTE_SANDBOX:
+                remote = True
+            if (
+                target in {MUSE_REMOTE_EXECUTION_TARGET, MUSE_REMOTE_PROVIDER}
+                and "execution_target" not in metadata
+            ):
+                metadata["execution_target"] = target
+            if sandbox == MUSE_REMOTE_SANDBOX and "sandbox" not in metadata:
+                metadata["sandbox"] = sandbox
+            if isinstance(item.get("turn_status"), str) and "turn_status" not in metadata:
+                turn_status = _metadata_code(item["turn_status"])
+                if turn_status:
+                    metadata["turn_status"] = turn_status
+            if isinstance(item.get("delivery"), dict) and "delivery" not in metadata:
+                metadata["delivery"] = dict(item["delivery"])
+            elif isinstance(item.get("role_delivery"), dict) and "delivery" not in metadata:
+                metadata["delivery"] = dict(item["role_delivery"])
+            for child in item.values():
+                pending.append((child, depth + 1))
+        elif isinstance(item, list):
+            pending.extend((child, depth + 1) for child in item[:500])
+    return remote, metadata
+
+
+def _sanitize_remote_projection(
+    value: Any,
+    *,
+    inherited_remote: bool = False,
+    parent_key: str | None = None,
+    depth: int = 0,
+) -> Any:
+    """Remove host paths and role bodies from a remote provider projection."""
+
+    if depth > 8:
+        return value
+    if isinstance(value, dict):
+        provider = value.get("provider")
+        remote = inherited_remote
+        if isinstance(provider, str):
+            remote = provider.casefold() == MUSE_REMOTE_PROVIDER
+        else:
+            target = value.get("execution_target")
+            sandbox = value.get("sandbox")
+            if target in {MUSE_REMOTE_EXECUTION_TARGET, MUSE_REMOTE_PROVIDER} or sandbox == MUSE_REMOTE_SANDBOX:
+                remote = True
+        output: dict[str, Any] = {}
+        has_delivery = "delivery" in value
+        for raw_key, child in value.items():
+            key = _safe_key(raw_key)
+            if key is None:
+                continue
+            lowered = key.casefold()
+            if remote and lowered in REMOTE_PATH_KEYS:
+                continue
+            if remote and lowered in REMOTE_ROLE_BODY_KEYS:
+                continue
+            if remote and parent_key == "delivery" and lowered in {"body", "content", "text"}:
+                continue
+            if remote and lowered == "role_delivery":
+                if has_delivery:
+                    continue
+                cleaned = _sanitize_remote_projection(
+                    child, inherited_remote=True, parent_key="delivery", depth=depth + 1
+                )
+                if isinstance(cleaned, dict):
+                    output["delivery"] = cleaned
+                    has_delivery = True
+                continue
+            output[key] = _sanitize_remote_projection(
+                child,
+                inherited_remote=remote,
+                parent_key=lowered,
+                depth=depth + 1,
+            )
+        return output
+    if isinstance(value, list):
+        return [
+            _sanitize_remote_projection(
+                child,
+                inherited_remote=inherited_remote,
+                parent_key=parent_key,
+                depth=depth + 1,
+            )
+            for child in value
+        ]
     return value
 
 
@@ -459,6 +652,9 @@ def _sanitize(value: Any, settings: aoitalk.Settings) -> Any:
     result = visit(value)
     if result is omitted or not isinstance(result, dict):
         raise CliSessionError("server_error", detail="AoiTalk returned an invalid response")
+    remote, _ = _remote_safety_metadata(result)
+    if remote:
+        result = _sanitize_remote_projection(result, inherited_remote=True)
     if truncated:
         # An event cursor may advance only when every event before that cursor
         # was delivered.  If output budgeting dropped any event/text, remove
@@ -480,7 +676,9 @@ def _sanitize(value: Any, settings: aoitalk.Settings) -> Any:
     return result
 
 
-def _public_success(data: dict[str, Any], **extra: Any) -> dict[str, Any]:
+def _public_success(
+    data: dict[str, Any], *, provider_hint: str | None = None, **extra: Any
+) -> dict[str, Any]:
     result = {"ok": True, **data, **extra}
     nested = result.get("session")
     if isinstance(nested, dict) and "session_id" not in result:
@@ -489,6 +687,20 @@ def _public_success(data: dict[str, Any], **extra: Any) -> dict[str, Any]:
             result["session_id"] = candidate
     if "session_id" not in result and isinstance(result.get("id"), str):
         result["session_id"] = result["id"]
+    remote, metadata = _remote_safety_metadata(result, provider_hint=provider_hint)
+    if remote:
+        # These facts describe the execution boundary, not the provider's
+        # private credentials or role material.  Keep them explicit even when
+        # a rolling AoiTalk response omits one of the diagnostic fields.
+        result["execution_target"] = metadata.get(
+            "execution_target", MUSE_REMOTE_EXECUTION_TARGET
+        )
+        result["local_filesystem"] = False
+        result["sandbox"] = metadata.get("sandbox", MUSE_REMOTE_SANDBOX)
+        if "turn_status" in metadata:
+            result["turn_status"] = metadata["turn_status"]
+        if isinstance(metadata.get("delivery"), dict):
+            result["delivery"] = metadata["delivery"]
     return result
 
 
@@ -500,26 +712,33 @@ def _uncertain(exc: CliSessionError) -> bool:
 
 async def aoitalk_cli_session_create(
     agent_id: Annotated[str, Field(min_length=36, max_length=36)],
-    provider: Literal["codex-cli", "claude-cli", "grok-cli", "antigravity-cli"],
-    model: Annotated[str, Field(min_length=1, max_length=160)],
-    working_directory: Annotated[str, Field(min_length=1, max_length=1024)],
-    idempotency_key: Annotated[str, Field(min_length=1, max_length=128)],
-    effort: Annotated[str | None, Field(max_length=40)] = None,
+    provider: Literal["codex-cli", "claude-cli", "grok-cli", "antigravity-cli", "muse-remote"],
+    model: Annotated[str | None, Field(min_length=1, max_length=160)] = _MISSING,
+    working_directory: Annotated[str | None, Field(min_length=1, max_length=1024)] = _MISSING,
+    idempotency_key: Annotated[str, Field(min_length=1, max_length=128)] = _MISSING,
+    effort: Annotated[str | None, Field(max_length=40)] = _MISSING,
     title: Annotated[str | None, Field(max_length=200)] = None,
-    permission_mode: Literal["native_default", "standard", "accept_edits"] = "native_default",
+    permission_mode: Literal["native_default", "standard", "accept_edits"] | None = _MISSING,
     allowed_capabilities: Annotated[
         list[Literal["command_execute", "workspace_read", "workspace_write"]] | None,
         Field(min_length=1, max_length=3),
-    ] = None,
-    execution_profile_id: Annotated[str | None, Field(min_length=1, max_length=128)] = None,
+    ] = _MISSING,
+    execution_profile_id: Annotated[str | None, Field(min_length=1, max_length=64)] = None,
+    role_context_mode: Literal["raw", "agent_role"] | None = None,
+    agent_revision_id: Annotated[str | None, Field(min_length=36, max_length=36)] = None,
 ) -> dict[str, Any]:
     """Create a durable AoiTalk CLI continuation session; never starts a local CLI here.
 
+    ``muse-remote`` is a server-owned remote route.  It accepts only the common
+    identity/idempotency fields plus optional title, execution profile, and role
+    context mode, and an optional explicit revision pin; the remote route fields
+    are rejected when supplied, including explicit nulls.
     allowed_capabilities optionally narrows the session to a nonempty subset of the Agent's
     capability ceiling; omit it to keep the service default.
-    execution_profile_id optionally selects an AoiTalk execution profile by opaque id; omit it
-    (or pass null) to keep the service default. The Gateway only forwards it."""
-    state = {"idempotency_key": idempotency_key}
+    execution_profile_id optionally selects an AoiTalk execution profile by opaque id (1-64 chars, no
+    whitespace, sent exactly as given); omit it (or pass null) to keep the service default.
+    The Gateway only forwards it."""
+    state = {"idempotency_key": idempotency_key if isinstance(idempotency_key, str) else None}
     attempted = False
     try:
         _bounded_text(agent_id, "agent_id", 36)
@@ -527,15 +746,63 @@ async def aoitalk_cli_session_create(
             raise CliSessionError("invalid_input", detail="agent_id must be a UUID")
         if provider not in PROVIDERS:
             raise CliSessionError("invalid_input", detail="provider is not supported")
-        _bounded_text(model, "model", 160)
-        workspace = _absolute_directory(working_directory)
         key = _key(idempotency_key)
-        if permission_mode not in PERMISSION_MODES:
-            raise CliSessionError("invalid_input", detail="permission_mode is not supported")
-        body: dict[str, Any] = {"agent_id": agent_id, "provider": provider, "model": model,
-                                "working_directory": workspace, "idempotency_key": key,
-                                "permission_mode": permission_mode}
-        if allowed_capabilities is not None:
+        if (role_context_mode is not None
+                and (not isinstance(role_context_mode, str)
+                     or role_context_mode not in ROLE_CONTEXT_MODES)):
+            raise CliSessionError("invalid_input", detail="role_context_mode is not supported")
+        if agent_revision_id is not None and not SESSION_ID_RE.fullmatch(agent_revision_id):
+            raise CliSessionError("invalid_input", detail="agent_revision_id must be a UUID")
+
+        if provider == MUSE_REMOTE_PROVIDER:
+            candidate_fields = {
+                "working_directory": working_directory,
+                "permission_mode": permission_mode,
+                "allowed_capabilities": allowed_capabilities,
+                "model": model,
+                "effort": effort,
+            }
+            supplied = {
+                name: value
+                for name, value in candidate_fields.items()
+                if name in REMOTE_UNSUPPORTED_CREATE_FIELDS
+                if value is not _MISSING
+            }
+            if supplied:
+                raise CliSessionError(
+                    "invalid_input",
+                    detail=("muse-remote create does not accept: "
+                            + ", ".join(sorted(supplied))),
+                )
+            body: dict[str, Any] = {
+                "agent_id": agent_id,
+                "provider": provider,
+                "idempotency_key": key,
+            }
+        else:
+            if model is _MISSING or model is None:
+                raise CliSessionError("invalid_input", detail="model is required for local providers")
+            if working_directory is _MISSING or working_directory is None:
+                raise CliSessionError(
+                    "invalid_input", detail="working_directory is required for local providers")
+            _bounded_text(model, "model", 160)
+            workspace = _absolute_directory(working_directory)
+            effective_permission_mode = (
+                "native_default" if permission_mode is _MISSING else permission_mode
+            )
+            if effective_permission_mode not in PERMISSION_MODES:
+                raise CliSessionError("invalid_input", detail="permission_mode is not supported")
+            body = {
+                "agent_id": agent_id,
+                "provider": provider,
+                "model": model,
+                "working_directory": workspace,
+                "idempotency_key": key,
+                "permission_mode": effective_permission_mode,
+            }
+        if (provider != MUSE_REMOTE_PROVIDER
+                and allowed_capabilities is not _MISSING
+                and allowed_capabilities is not None):
             if (not isinstance(allowed_capabilities, list) or not 1 <= len(allowed_capabilities) <= 3
                     or any(not isinstance(item, str) or item not in CLI_CAPABILITIES
                            for item in allowed_capabilities)):
@@ -545,9 +812,16 @@ async def aoitalk_cli_session_create(
         if execution_profile_id is not None:
             if not isinstance(execution_profile_id, str):
                 raise CliSessionError("invalid_input", detail="execution_profile_id must be a string")
+            if any(char.isspace() or unicodedata.category(char) == "Cc" for char in execution_profile_id):
+                raise CliSessionError("invalid_input",
+                                      detail="execution_profile_id must not contain whitespace or control characters")
             body["execution_profile_id"] = _bounded_text(
-                execution_profile_id.strip(), "execution_profile_id", 128, allow_newlines=False)
-        if effort is not None:
+                execution_profile_id, "execution_profile_id", 64, allow_newlines=False)
+        if role_context_mode is not None:
+            body["role_context_mode"] = role_context_mode
+        if agent_revision_id is not None:
+            body["agent_revision_id"] = agent_revision_id
+        if (provider != MUSE_REMOTE_PROVIDER and effort is not _MISSING and effort is not None):
             body["effort"] = _bounded_text(effort, "effort", 40)
         if title is not None:
             body["title"] = _bounded_text(title, "title", 200, allow_newlines=False)
@@ -557,7 +831,7 @@ async def aoitalk_cli_session_create(
             attempted = True
             _, data = await client.call("POST", "/api/cli-sessions", json=body,
                                         headers={"Idempotency-Key": key})
-            return _public_success(data, idempotency_key=key)
+            return _public_success(data, provider_hint=provider, idempotency_key=key)
 
         return await _session(create)
     except CliSessionError as exc:

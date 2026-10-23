@@ -188,6 +188,10 @@ HOME_MCP_AOITALK_ENABLED=1
 
 AoiTalk 本身必须已经安装并在本机配置好，包括端点、认证和所需功能。本 Gateway 不会安装或配置 AoiTalk。默认配置公开 **76 个工具**；启用 AoiTalk 后公开 **97 个工具**。不要将 AoiTalk 凭据发送给 ChatGPT。
 
+专用 AoiTalk MCP 连接会公开独立的 **35 个工具**。Phase A 验证期间，通用 Gateway 仍保留现有 21 个工具。将单独配置的 Tunnel ID 写入 `HOME_MCP_AOITALK_TUNNEL_ID`；如需独立 Restricted runtime key，可设置 `HOME_MCP_AOITALK_RUNTIME_API_KEY`。完成单独的隧道 preflight 后，使用 `scripts\connect_tunnel.ps1 -Target aoitalk`。它使用独立 alias/profile `aoitalk`，状态和日志位于 `.runtime\aoitalk\`，profile 文件位于 `.runtime\profiles\aoitalk.yaml`。如需注册独立的自动启动任务，使用 `scripts\install_autostart.ps1 -Target aoitalk`；默认任务名为 `Home MCP Gateway - AoiTalk`。这些命令不会创建 Tunnel，也不会在 GUI 中添加或刷新 Plugin。
+
+工具、operation ID 状态恢复以及 Docs/Knowledge 分页契约见[专用 AoiTalk MCP 指南](docs/aoitalk-plugin.md)。
+
 ## 工具分组
 
 默认配置公开 76 个工具，主要分组如下：
@@ -201,6 +205,7 @@ AoiTalk 本身必须已经安装并在本机配置好，包括端点、认证和
 | 开发工作流 | Git 仓库 / worktree、持久化任务以及浏览器会话（Playwright） |
 | 图像与诊断 | 图像上下文和本地工具计时诊断 |
 | AoiTalk（可选） | 剪辑导入、本地/API Agent 任务委派与最终回答获取，以及 CLI 持续会话；增加 21 个工具 |
+| 专用 AoiTalk Plugin | 独立的35个 Task/Docs/Knowledge管理工具及runtime |
 
 这些分组不会额外建立 allowlist 或 read-only 边界。请只将连接和提示交给可信的人和工作流。
 

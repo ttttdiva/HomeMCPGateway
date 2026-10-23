@@ -30,6 +30,7 @@ class AgentTaskFields(TypedDict, total=False):
     progress: Any
     result: Any
     failure: dict[str, Any] | None
+    tool_failures: dict[str, Any] | None
 
 
 class BusinessReply(TypedDict, total=False):
@@ -37,6 +38,8 @@ class BusinessReply(TypedDict, total=False):
     error: str
     message: str
     http_status: int
+    retry_after_seconds: int
+    local_cooldown_seconds: int
     error_source: str
     server_error_code: str
     server_detail: str

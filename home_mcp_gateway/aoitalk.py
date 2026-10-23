@@ -17,6 +17,8 @@ import os
 from pathlib import Path
 import re
 import time
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -47,11 +49,36 @@ MESSAGES = {
 }
 
 
+MAX_RETRY_AFTER_SECONDS = 86400
+
+
+def parse_retry_after(value: Any, now: datetime | None = None) -> int | None:
+    """Return whole seconds from a bounded delta-seconds or HTTP-date header, else None."""
+    if not isinstance(value, str) or not value.strip() or len(value) > 64:
+        return None
+    value = value.strip()
+    if value.isascii() and value.isdigit():
+        seconds = int(value)
+    else:
+        try:
+            when = parsedate_to_datetime(value)
+        except (TypeError, ValueError, IndexError):
+            return None
+        if when.tzinfo is None:
+            return None
+        seconds = math.ceil((when - (now or datetime.now(timezone.utc))).total_seconds())
+        seconds = max(0, seconds)
+    return seconds if seconds <= MAX_RETRY_AFTER_SECONDS else None
+
+
 class ClipError(Exception):
-    def __init__(self, code: str, http_status: int | None = None):
+    def __init__(self, code: str, http_status: int | None = None, retry_after: int | None = None,
+                 local_hold: int | None = None):
         super().__init__(MESSAGES[code])
         self.code = code
         self.http_status = http_status
+        self.retry_after = retry_after  # server-advertised delay only
+        self.local_hold = local_hold  # Gateway-internal cooldown remaining; server delay unknown
 
 
 @dataclass(frozen=True)
@@ -138,6 +165,10 @@ def _error(exc: ClipError, **state: Any) -> dict[str, Any]:
     result = {"ok": False, "saved": False, "error": exc.code, "message": MESSAGES[exc.code], **state}
     if exc.http_status is not None:
         result["http_status"] = exc.http_status
+    if exc.retry_after is not None:
+        result["retry_after_seconds"] = exc.retry_after
+    if exc.local_hold is not None:
+        result["local_cooldown_seconds"] = exc.local_hold
     return result
 
 
@@ -158,11 +189,17 @@ def _safe_text(value: Any, settings: Settings, limit: int = 300) -> str:
 
 
 class Client:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, http: httpx.AsyncClient | None = None):
         self.settings = settings
+        # A borrowed transport belongs to the Gateway auth owner; only owners close it.
+        self.owns_http = http is None
         # Do not forward local passwords through proxy env variables or redirects.
-        self.http = httpx.AsyncClient(base_url=settings.base_url, trust_env=False,
-                                      follow_redirects=False, timeout=REQUEST_TIMEOUT)
+        self.http = http or httpx.AsyncClient(base_url=settings.base_url, trust_env=False,
+                                              follow_redirects=False, timeout=REQUEST_TIMEOUT)
+
+    async def aclose(self) -> None:
+        if self.owns_http:
+            await self.http.aclose()
 
     async def request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         try:
@@ -173,7 +210,8 @@ class Client:
                             409: "conflict", 429: "rate_limited"}.get(status, "server_error")
                     if 300 <= status < 400:
                         code = "configuration_error"
-                    raise ClipError(code, status)
+                    raise ClipError(code, status, parse_retry_after(response.headers.get("retry-after"))
+                                    if status == 429 else None)
                 parts: list[bytes] = []
                 size = 0
                 async for part in response.aiter_bytes():

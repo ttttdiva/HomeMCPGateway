@@ -53,3 +53,15 @@ bodies over 2 MiB are rejected, never silently adopted. Every returned page is
 bounded by the 64 KiB JSON response budget. This gateway change needs no new
 upstream endpoint; an installed gateway must be updated separately before the
 new tool is available in a live tool catalog.
+
+## Authentication reuse and Retry-After
+
+While the Gateway lifespan is active, the task, Agent-task and CLI-session adapters share one in-memory,
+event-loop-local authenticated transport per validated endpoint/username/password (`aoitalk_auth.py`).
+Initial login is single-flight; cookies are never written to disk and reads stay fresh API calls. A changed
+configuration, a 401 from the API, or Gateway shutdown drops and closes the client. Operations are never
+replayed after an error. A login 429 stores its validated `Retry-After` (seconds or HTTP-date, at most 24 h)
+as a monotonic per-endpoint/user cooldown; callers inside it get `rate_limited` with `retry_after_seconds`
+and no new login. An API (non-login) 429 starts the same cooldown, so following calls make no request until it expires. A missing or malformed header yields `rate_limited` without `retry_after_seconds` and holds a 60 s Gateway-internal cooldown, reported as `local_cooldown_seconds` (never as the server-advertised `retry_after_seconds`).
+Outside the lifespan (tests, other loops) and in the `aoitalk_clip_*` tools, each call still logs in once;
+those tools report `retry_after_seconds` but do not share a session.

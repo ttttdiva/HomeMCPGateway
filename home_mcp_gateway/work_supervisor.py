@@ -37,10 +37,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from . import aoitalk, aoitalk_cli_sessions as cli, aoitalk_tasks as tasks
+from . import aoitalk, aoitalk_cli_sessions as cli, aoitalk_tasks as tasks, work_dispatcher_codex, codex_app_server
 
 SCHEMA_VERSION = 3          # status.json schema
-LEDGER_VERSION = 4          # SQLite ledger (v2: run/message handoffs, v3: re-classified, v4: runs / outbox / recovery)
+LEDGER_VERSION = 5          # v5: additive standalone Gateway Codex observation ledger
 POLL_SECONDS = 10.0
 MIN_CLAUDE = 8
 AUX_TARGET = 6
@@ -60,6 +60,8 @@ TERMINAL_EVENT_RE = re.compile(r"(?i)(?:cli|run)\.(?:completed|failed|cancelled|
 RESULT_EVENT_RE = re.compile(r"(?i)(?:cli|run)\.(?:result|final)")
 MAX_CHUNKS = 1000
 COLLECT_GROUP = 10
+TERMINAL_RECHECKS_PER_POLL = 3   # known terminal+drained sessions re-collected per poll (fair rotation): a follow-up that started and ended between polls is never observed active
+TERMINAL_RECHECK_SECONDS = 120.0   # minimum age of the last collection before a drained terminal session is rechecked without a change hint
 BACKLOG_PER_POLL = 10           # terminal, not-yet-drained sessions collected per poll (fair rotation) so a first catch-up cannot stall the loop
 MAX_HEARTBEAT_TTL = 86_400.0
 RUN_STATUSES = ("queued", "running", "awaiting_approval", "uncertain", "succeeded", "failed", "cancelled")
@@ -76,6 +78,16 @@ RECOVERY_MAX_ATTEMPTS = 30
 MESSAGE_LIMITS = (20, 5, 1)
 MESSAGE_PAGES = 3
 MESSAGE_CLIP_CHARS = 12_000     # cli._sanitize clips every string field here
+GATEWAY_METADATA_MAX_BYTES = 64 << 10
+GATEWAY_MAX_JOBS_PER_POLL = 12
+GATEWAY_MAX_BYTES_PER_POLL = 64 << 20
+GATEWAY_MAX_FILE_BYTES = work_dispatcher_codex.MAX_JSONL_BYTES
+GATEWAY_PRIORITY_SHARE = 0.5
+GATEWAY_STDOUT_CHANGE_RETRY_CODES = frozenset({
+    "partial_jsonl", "invalid_jsonl", "empty_or_invalid_jsonl", "terminal_record_invalid",
+    "events_after_terminal", "agent_message_invalid", "final_message_missing",
+})
+GATEWAY_BACKOFF_SECONDS = 30.0
 BACKOFF_DENIED = 3600.0
 BACKOFF_RETRY = 30.0
 UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
@@ -149,9 +161,10 @@ CREATE TABLE IF NOT EXISTS snapshots(
 class SupervisorError(Exception):
     """Carries only a fixed, safe error code."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, bytes_read: int = 0):
         super().__init__(code)
         self.code = code
+        self.bytes_read = bytes_read
 
 
 def safe_code(exc: BaseException) -> str:
@@ -193,6 +206,8 @@ def connect(directory: Path = ROOT_DIR) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=30000")
     conn.executescript(SCHEMA)
     migrate(conn, directory)
+    if "app_server_evidence_json" not in _columns(conn, "gateway_jobs"):
+        conn.execute("ALTER TABLE gateway_jobs ADD COLUMN app_server_evidence_json TEXT")
     if "collected_at" not in _columns(conn, "sessions"):     # additive, idempotent (v4 ledgers created before this column)
         conn.execute("ALTER TABLE sessions ADD COLUMN collected_at REAL")
     return conn
@@ -203,20 +218,37 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 
 def migrate(conn: sqlite3.Connection, directory: Path) -> None:
-    """v1/v2/v3 -> v4.  Original observations are preserved: a backup copy is taken first and no row
+    """Migrate old ledgers with a backup before schema changes.  Original observations are preserved: a backup copy is taken first and no row
     is deleted.  v1 session-keyed handoffs (which could mix turns) are only marked superseded; stored
     events are re-classified under the current rules; every existing handoff gets an outbox row
-    (ready -> pending, already acked -> received by legacy ack, superseded -> superseded)."""
+    (ready -> pending, already acked -> received by legacy ack, superseded -> superseded).  v4 -> v5 is strictly additive."""
     row = conn.execute("SELECT value FROM meta WHERE key='ledger_version'").fetchone()
-    if row is not None and int(row[0]) >= LEDGER_VERSION:
+    version = int(row[0]) if row is not None else 0
+    if version >= LEDGER_VERSION:
         return
-    had_data = conn.execute("SELECT 1 FROM snapshots LIMIT 1").fetchone() is not None
+    had_data = any(conn.execute(f'SELECT 1 FROM "{name}" LIMIT 1').fetchone() is not None
+                   for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall())
     if had_data:
-        backup = directory / f"state.sqlite3.pre-v{LEDGER_VERSION}-{int(time.time())}.bak"
+        backup = directory / f"state.sqlite3.pre-v{LEDGER_VERSION}-{time.time_ns()}.bak"
         with contextlib.closing(sqlite3.connect(backup)) as target:
             conn.backup(target)
     conn.execute("BEGIN IMMEDIATE")
     try:
+        conn.execute("""CREATE TABLE IF NOT EXISTS gateway_jobs(
+          job_id TEXT PRIMARY KEY, launch_identity TEXT, thread_id TEXT, final_item_id TEXT,
+          result_digest TEXT, log_digest TEXT, log_bytes INTEGER, stdout_ref TEXT,
+          stdout_size INTEGER, stdout_mtime_ns INTEGER, stdout_file_identity TEXT,
+          process_status TEXT NOT NULL DEFAULT 'unknown', exit_code INTEGER,
+          turn_status TEXT NOT NULL DEFAULT 'unknown', execution_status TEXT NOT NULL DEFAULT 'unknown',
+          result_state TEXT NOT NULL DEFAULT 'pending', error_code TEXT,
+          error_attempts INTEGER NOT NULL DEFAULT 0, next_check_at REAL,
+          observed_at REAL NOT NULL, handoff_id TEXT UNIQUE)""")
+        if version == 4:
+            # The previous schema already performed legacy repair. Do not rewrite any v4 handoff,
+            # outbox, receipt, or acknowledgement rows during this additive migration.
+            conn.execute("INSERT OR REPLACE INTO meta VALUES('ledger_version', ?)", (str(LEDGER_VERSION),))
+            conn.execute("COMMIT")
+            return
         for table, column, kind in (("sessions", "drained", "INTEGER NOT NULL DEFAULT 0"), ("sessions", "collect_error", "TEXT"), ("sessions", "collected_at", "REAL"),
                                     ("inbox", "run_id", "TEXT"), ("inbox", "message_id", "TEXT"), ("inbox", "handoff_id", "TEXT"),
                                     ("handoffs", "run_id", "TEXT"), ("handoffs", "message_id", "TEXT"), ("handoffs", "result_text", "TEXT"),
@@ -439,6 +471,12 @@ class Fetched:
         self.task_lists: dict[str, list[dict[str, Any]]] = {}
         self.task_details: dict[str, dict[str, Any]] = {}
         self.jobs: dict[str, Any] = {}
+        self.gateway_observations: list[dict[str, Any]] = []
+        self.gateway_cursor_next: str | None = None
+        self.gateway_previous: dict[str, dict[str, Any]] = {}
+        self.gateway_summary: dict[str, Any] = {"discovered": 0, "observed": 0, "pending": 0, "conflicts": 0,
+                                                "handoffs": 0, "errors": []}
+        self.gateway_cursor = ""
 
     def source(self, name: str, *, ok: bool, lower_bound: bool = False, error: str | None = None) -> None:
         previous = self.sources.get(name, {"complete": True, "lower_bound": False, "error": None})
@@ -452,6 +490,8 @@ def make_plan(conn: sqlite3.Connection, now: float | None = None) -> dict[str, A
     sessions = {row["session_id"]: dict(row) for row in conn.execute("SELECT * FROM sessions")}
     pending = {row["task_id"]: dict(row) for row in conn.execute(
         "SELECT task_id, status, result_json FROM tasks WHERE terminal_confirmed_at IS NULL OR result_json IS NULL")}
+    gateway_rows = {row["job_id"]: dict(row) for row in conn.execute("SELECT * FROM gateway_jobs")}
+    cursor_row = conn.execute("SELECT value FROM meta WHERE key='gateway_cursor'").fetchone()
     run_lists = {(r["session_id"], r["status"]): r["observed_at"] for r in conn.execute("SELECT * FROM run_lists")}
     # Known run IDs are persisted; checks rotate fairly (never-checked / least recently checked first) and are capped.
     checks = [(r["run_id"], r["session_id"]) for r in conn.execute(
@@ -469,7 +509,9 @@ def make_plan(conn: sqlite3.Connection, now: float | None = None) -> dict[str, A
         base = r["remote_created_at"] or ((r["terminal_at"] or now) - 3600.0)
         recoveries.append({"run_id": r["run_id"], "session_id": r["session_id"], "message_id": r["message_id"],
                            "since": iso(max(0.0, base - 60.0))})
-    return {"sessions": sessions, "tasks": pending, "run_lists": run_lists, "run_checks": checks, "recoveries": recoveries}
+    return {"sessions": sessions, "tasks": pending, "run_lists": run_lists, "run_checks": checks,
+            "recoveries": recoveries, "gateway_jobs": gateway_rows,
+            "gateway_cursor": cursor_row[0] if cursor_row else ""}
 
 
 def _session_id(item: Any) -> str | None:
@@ -549,19 +591,20 @@ def _item_error_code(page: dict[str, Any]) -> str | None:
     return code if isinstance(code, str) and ITEM_CODE_RE.fullmatch(code) else "item_error"
 
 
-async def _collect(client: Any, out: Fetched, plan: dict[str, Any], discovered: set[str]) -> None:
+async def _collect(client: Any, out: Fetched, plan: dict[str, Any], discovered: set[str],
+                   revisit: set[str] | None = None, rechecks: list[str] | None = None) -> None:
     active_listed = {_session_id(i) for status, items in out.cli_lists.items() if status not in CLI_TERMINAL for i in items}
     candidates = {sid for sid, row in plan["sessions"].items()
                   if row["status"] not in CLI_TERMINAL or not row["drained"] or row["cursor_stalled"]
-                  or row.get("collect_error")} | discovered
+                  or row.get("collect_error")} | discovered | (revisit or set())
     # Active / failing sessions are always collected; terminal sessions that still hold unread events rotate through
     # a bounded budget (least recently collected first), so the first catch-up of a large history cannot stall the loop.
     must = sorted(sid for sid in candidates if sid in active_listed or (sid in plan["sessions"] and (
         plan["sessions"][sid]["status"] not in CLI_TERMINAL or plan["sessions"][sid]["cursor_stalled"]
-        or plan["sessions"][sid].get("collect_error"))))
+        or plan["sessions"][sid].get("collect_error"))) or sid in (revisit or ()))
     backlog = sorted((sid for sid in candidates if sid not in must),
                      key=lambda sid: ((plan["sessions"].get(sid) or {}).get("collected_at") or 0.0, sid))
-    ids = sorted(must + backlog[:BACKLOG_PER_POLL])
+    ids = sorted(set(must + backlog[:BACKLOG_PER_POLL] + list(rechecks or ())))
     if len(backlog) > BACKLOG_PER_POLL:
         out.source("cli_collect", ok=True, lower_bound=True)    # more unread history than this poll's budget
     out.collected.update(ids)
@@ -572,6 +615,8 @@ async def _collect(client: Any, out: Fetched, plan: dict[str, Any], discovered: 
     reasons: dict[str, str] = {}
 
     async def fetch_group(group: list[str], limit: int) -> None:
+        if not group:
+            return
         cursors = {sid: plan["sessions"][sid]["cursor"] for sid in group
                    if sid in plan["sessions"] and plan["sessions"][sid]["cursor"]}
         body = {"cursors": cursors, "session_ids": group, "limit_per_session": limit}
@@ -597,12 +642,13 @@ async def _collect(client: Any, out: Fetched, plan: dict[str, Any], discovered: 
         for item in pages:
             if _session_id(item):
                 returned.setdefault(_session_id(item), item)
+        retry: list[str] = []
         for sid in group:
             page = returned.get(sid)
             if page is None:
                 if clipped:                     # the response budget dropped it: retry smaller, do not call it an error yet
                     reasons[sid] = "page_truncated"
-                    suspect.append(sid)
+                    retry.append(sid)
                 else:
                     out.item_errors[sid] = "page_missing"
                     out.source("cli_collect", ok=False, error="page_missing")
@@ -618,13 +664,22 @@ async def _collect(client: Any, out: Fetched, plan: dict[str, Any], discovered: 
                 out.item_errors.pop(sid, None)
             else:
                 reasons[sid] = "page_malformed" if verdict == "malformed" else "page_truncated"
-                suspect.append(sid)
+                retry.append(sid)
+        if len(group) > 1 and retry:
+            # A combined response that clips says nothing about any one session's page: split the affected sessions
+            # at the SAME limit and only shrink the limit for a session whose own isolated response still fails.
+            middle = len(retry) // 2 if len(retry) > 1 else 0
+            if middle:
+                await fetch_group(retry[:middle], limit)
+            await fetch_group(retry[middle:], limit)
+        else:
+            suspect.extend(retry)
         out.source("cli_collect", ok=True)
 
     for step, limit in enumerate(PAGE_LIMITS):
         if not suspect:
             break
-        size = 1 if step == len(PAGE_LIMITS) - 1 else COLLECT_GROUP
+        size = COLLECT_GROUP if step == 0 else 1     # later steps only hold sessions whose isolated page already failed
         groups = [suspect[i:i + size] for i in range(0, len(suspect), size)]
         suspect = []
         for group in groups:
@@ -722,10 +777,15 @@ async def _recover_message(client: Any, out: Fetched, rec: dict[str, Any]) -> No
                 result["reason"] = "message_not_found"
                 break
             result["reason"] = "message_not_in_bounded_page"
-            moved = data.get("server_time")
-            if not isinstance(moved, str) or parse_time(moved) is None or parse_time(moved) <= (parse_time(since) or 0):
+            # The route orders by created_at but filters on max(updated_at, created_at) with a 5s overlap, and its
+            # server_time is the page's latest updated_at: following it can jump over unread rows.  Only the last row's
+            # created_at is a proven cursor (every unread row has created_at >= it, hence matches the next filter).
+            stamps = [parse_time(m.get("created_at")) if isinstance(m, dict) else None for m in messages]
+            if any(t is None for t in stamps) or stamps != sorted(stamps) or stamps[-1] <= (parse_time(since) or 0):
+                break                                    # no proven progress (ties / unordered / missing): stay result-pending
+            if iso(stamps[-1]) == since:
                 break
-            since = moved
+            since = iso(stamps[-1])
         out.source("cli_message_recovery", ok=True)
     except (cli.CliSessionError, SupervisorError) as exc:
         result = {"ok": False, "reason": safe_code(exc), "message_id": rec["message_id"]}
@@ -800,39 +860,790 @@ async def _task_get(client: Any, task_id: str) -> tuple[bool, dict[str, Any]]:
 
 
 async def _fetch_jobs(out: Fetched) -> None:
-    from . import jobs
+    """Observe local Gateway jobs without consulting metadata-provided log paths."""
     try:
-        listing = await asyncio.to_thread(jobs.job_list, None, True)
-        out.jobs = {"active": len(listing.get("jobs", [])), "errors": len(listing.get("errors", []))}
-        out.source("jobs", ok=True)
+        result = await asyncio.to_thread(_scan_gateway_jobs, out.gateway_cursor, out.gateway_previous, out.observed_at)
+        out.gateway_observations = result["observations"]
+        out.gateway_cursor_next = result["cursor"]
+        out.gateway_summary = result["summary"]
+        out.jobs = {"active": result["active"], "active_lower_bound": bool(result["lower_bound"]),
+                    "errors": len(result["summary"]["errors"])}
+        out.source("jobs", ok=True, lower_bound=result["lower_bound"])
+        incomplete = bool(result["summary"]["errors"])
+        out.source("gateway_codex", ok=not incomplete, lower_bound=result["lower_bound"],
+                   error="gateway_observation_incomplete" if incomplete else None)
     except Exception as exc:  # noqa: BLE001 - only the safe code is kept
-        out.source("jobs", ok=False, error=safe_code(exc))
+        code = safe_code(exc)
+        out.source("jobs", ok=False, error=code)
+        out.source("gateway_codex", ok=False, error=code)
+
+
+def _same_stat(left: Any, right: Any) -> bool:
+    return bool(left and right and left.st_size == right.st_size and left.st_mtime_ns == right.st_mtime_ns
+                and left.st_ino == right.st_ino and left.st_dev == right.st_dev)
+
+
+def _safe_stat(path: Path) -> os.stat_result:
+    try:
+        stat = path.lstat()
+    except FileNotFoundError:
+        raise SupervisorError("file_missing") from None
+    except OSError:
+        raise SupervisorError("file_unreadable") from None
+    if os.path.islink(path) or not os.path.isfile(path):
+        raise SupervisorError("path_not_regular")
+    return stat
+
+
+def _read_stable_file(path: Path, max_bytes: int) -> tuple[bytes, os.stat_result]:
+    size = 0
+    before = _safe_stat(path)
+    if before.st_size > max_bytes:
+        raise SupervisorError("file_too_large")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+        with os.fdopen(fd, "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if not _same_stat(before, opened):
+                raise SupervisorError("file_changed")
+            chunks: list[bytes] = []
+            while size < max_bytes:
+                chunk = stream.read(min(1 << 20, max_bytes - size))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                size += len(chunk)
+            after_fd = os.fstat(stream.fileno())
+        after_path = _safe_stat(path)
+    except SupervisorError as exc:
+        exc.bytes_read = size
+        raise
+    except FileNotFoundError:
+        raise SupervisorError("file_missing") from None
+    except OSError:
+        raise SupervisorError("file_unreadable", bytes_read=size) from None
+    if not _same_stat(before, after_fd) or not _same_stat(before, after_path) or size != before.st_size:
+        raise SupervisorError("file_changed", bytes_read=size)
+    return b"".join(chunks), after_path
+
+
+def _inside(path: Path, root: Path) -> bool:
+    try:
+        return os.path.commonpath((os.path.normcase(str(path)), os.path.normcase(str(root)))) == os.path.normcase(str(root))
+    except (OSError, ValueError):
+        return False
+
+
+def _validate_gateway_job_directory(directory: Path, resolved_jobs: Path) -> Path:
+    try:
+        resolved = directory.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise SupervisorError("job_path_invalid") from None
+    if resolved != directory or not _inside(resolved, resolved_jobs):
+        raise SupervisorError("job_path_invalid")
+    return resolved
+
+
+def _looks_like_codex_exec(command: Any) -> bool:
+    if not isinstance(command, list) or len(command) < 2 or not all(isinstance(value, str) for value in command):
+        return False
+    entry = command[1].replace("/", "\\").casefold()
+    official = "\\node_modules\\@openai\\codex\\bin\\codex.js"
+    return entry.endswith(official) and ("exec" in command[2:] or "--json" in command[2:])
+
+
+def _pinned_appserver_transport(metadata: dict[str, Any]) -> bool:
+    """Select transport from the digest-verified manifest, never mutable ops."""
+    from .jobs import _dispatcher_binding_valid, stable_job_id
+    from .work_dispatcher import DispatchError, canonical, parse_manifest
+    from urllib.parse import quote
+    binding = metadata.get("dispatcher_binding")
+    if binding is None:
+        return False
+    if not _dispatcher_binding_valid(binding):
+        raise SupervisorError("binding_mismatch")
+    try:
+        path = Path(binding["db_path"]).resolve(strict=True)
+        uri = "file:" + quote(str(path).replace("\\", "/"), safe="/:\\") + "?mode=ro"
+        with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=0.2)) as conn:
+            conn.execute("PRAGMA query_only=ON")
+            row = conn.execute("SELECT digest,raw,root_source_id,root_epoch FROM manifests WHERE manifest_id=?",
+                               (binding["manifest_id"],)).fetchone()
+        if row is None:
+            raise SupervisorError("binding_unavailable")
+        manifest = parse_manifest(bytes(row[1]), binding["manifest_digest"])
+        if (row[0] != binding["manifest_digest"] or manifest["manifest_id"] != binding["manifest_id"]
+                or manifest["root_source_id"] != binding["root_source_id"] or row[2] != binding["root_source_id"]
+                or manifest["root_epoch"] != binding["root_epoch"] or row[3] != binding["root_epoch"]
+                or metadata.get("job_id") != binding["gateway_job_id"]
+                or stable_job_id(binding["op_key"]) != binding["gateway_job_id"]):
+            raise SupervisorError("binding_mismatch")
+        pinned = next((job for job in manifest["jobs"] if job["job_id"] == binding["job_id"]), None)
+        if (pinned is None or pinned.get("route") != "gateway-codex" or pinned["create_key"] != binding["op_key"]
+                or hashlib.sha256(canonical(pinned["create_request"]).encode("utf-8")).hexdigest() != binding["request_digest"]
+                or binding["request_digest"] != binding["request_fingerprint"]):
+            raise SupervisorError("binding_mismatch")
+        return pinned["create_request"].get("transport") == codex_app_server.TRANSPORT
+    except DispatchError:
+        raise SupervisorError("binding_mismatch") from None
+    except (OSError, ValueError, TypeError, sqlite3.Error, RecursionError):
+        raise SupervisorError("binding_unavailable") from None
+
+
+def _canonical_executable(value: str, *, official_entrypoint: bool = False) -> str:
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        raise SupervisorError("launch_path_invalid")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise SupervisorError("launch_path_invalid") from None
+    if not resolved.is_file() or os.path.normcase(os.path.normpath(str(resolved))) != os.path.normcase(os.path.normpath(value)):
+        raise SupervisorError("launch_path_invalid")
+    if official_entrypoint:
+        suffix = tuple(part.casefold() for part in resolved.parts[-len(work_dispatcher_codex.OFFICIAL_ENTRYPOINT_SUFFIX):])
+        if suffix != tuple(part.casefold() for part in work_dispatcher_codex.OFFICIAL_ENTRYPOINT_SUFFIX):
+            raise SupervisorError("entrypoint_untrusted")
+    elif resolved.name.casefold() not in {"node.exe", "node"}:
+        raise SupervisorError("node_untrusted")
+    return str(resolved)
+
+
+def _validated_gateway_metadata(metadata: Any, job_id: str, directory: Path, runtime_root: Path) -> tuple[str, list[str]]:
+    if not isinstance(metadata, dict):
+        raise SupervisorError("metadata_invalid")
+    if metadata.get("job_id") != job_id:
+        raise SupervisorError("metadata_job_id_mismatch")
+    if metadata.get("transport") == codex_app_server.TRANSPORT:
+        return _validated_appserver_metadata(metadata, job_id, directory, runtime_root)
+    if "app_server" in metadata or _pinned_appserver_transport(metadata):
+        raise SupervisorError("app_server_transport_mismatch")
+    command = metadata.get("command")
+    if not _looks_like_codex_exec(command):
+        raise SupervisorError("launch_not_gateway_codex")
+    argv = command
+    if (len(argv) < 5 or argv[2] != "exec" or argv.count("--json") != 1
+            or "--json" not in argv[3:-1] or any("\x00" in value for value in argv)):
+        raise SupervisorError("launch_shape_invalid")
+    _canonical_executable(argv[0])
+    _canonical_executable(argv[1], official_entrypoint=True)
+    expected_stdout = directory / "stdout.log"
+    raw_stdout = metadata.get("stdout_path")
+    if not isinstance(raw_stdout, str) or not Path(raw_stdout).is_absolute():
+        raise SupervisorError("stdout_reference_invalid")
+    if os.path.normcase(os.path.normpath(raw_stdout)) != os.path.normcase(os.path.normpath(str(expected_stdout))):
+        raise SupervisorError("stdout_reference_mismatch")
+    if "runtime_dir" in metadata:
+        raw_runtime = metadata.get("runtime_dir")
+        if not isinstance(raw_runtime, str) or os.path.normcase(os.path.normpath(raw_runtime)) != os.path.normcase(os.path.normpath(str(runtime_root))):
+            raise SupervisorError("runtime_reference_mismatch")
+    if not isinstance(metadata.get("cwd"), str) or not metadata["cwd"]:
+        raise SupervisorError("launch_identity_invalid")
+    started_at = metadata.get("started_at")
+    if isinstance(started_at, bool) or not isinstance(started_at, (int, float)):
+        raise SupervisorError("launch_identity_invalid")
+    stable = {"job_id": job_id, "command": argv, "cwd": metadata["cwd"], "started_at": started_at,
+              "runtime_dir": metadata.get("runtime_dir", str(runtime_root)), "stdout_ref": f"jobs/{job_id}/stdout.log"}
+    for key in ("idempotency_key", "request_fingerprint", "dispatcher_request_fingerprint", "explicit_env_digest", "dispatcher_binding"):
+        if key in metadata:
+            stable[key] = metadata[key]
+    identity = hashlib.sha256(json.dumps(stable, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+    return identity, argv
+
+
+def _validated_appserver_metadata(metadata: dict[str, Any], job_id: str, directory: Path,
+                                 runtime_root: Path) -> tuple[str, list[str]]:
+    """Select the separate transport only from its immutable metadata discriminator."""
+    if metadata.get("transport") != codex_app_server.TRANSPORT:
+        raise SupervisorError("app_server_transport_mismatch")
+    guard = work_dispatcher_codex.steer_guard(metadata.get("dispatcher_binding"), metadata, require_running=False)
+    if guard != "open":
+        raise SupervisorError("binding_mismatch" if guard == "mismatch" else "binding_unavailable" if guard == "unavailable" else "binding_closed")
+    try:
+        argv = work_dispatcher_codex.validate_app_server_command(metadata.get("command"))
+        if not isinstance(metadata.get("cwd"), str):
+            raise ValueError("invalid_cwd")
+        spec = work_dispatcher_codex.validate_app_server_spec(metadata.get("app_server"), cwd=metadata["cwd"])
+    except (ValueError, TypeError, OSError, RuntimeError):
+        raise SupervisorError("app_server_metadata_invalid") from None
+    if metadata.get("job_id") != job_id:
+        raise SupervisorError("metadata_job_id_mismatch")
+    started_at = metadata.get("started_at")
+    if isinstance(started_at, bool) or not isinstance(started_at, (int, float)):
+        raise SupervisorError("launch_identity_invalid")
+    if metadata.get("runtime_dir", str(runtime_root)) != str(runtime_root):
+        raise SupervisorError("runtime_reference_mismatch")
+    runtime = metadata.get("app_server_runtime")
+    if runtime is not None and not isinstance(runtime, dict):
+        raise SupervisorError("app_server_metadata_invalid")
+    expected_journal = directory / "appserver.rpc.jsonl"
+    journal_ref = runtime.get("journal_path") if isinstance(runtime, dict) else None
+    if journal_ref is not None and journal_ref != str(expected_journal):
+        raise SupervisorError("rpc_journal_reference_mismatch")
+    stable = {"job_id": job_id, "command": argv, "cwd": spec["cwd"], "started_at": started_at,
+              "transport": codex_app_server.TRANSPORT, "app_server": spec,
+              "runtime_dir": str(runtime_root), "journal_ref": f"jobs/{job_id}/appserver.rpc.jsonl"}
+    for key in ("idempotency_key", "request_fingerprint", "dispatcher_request_fingerprint", "explicit_env_digest", "dispatcher_binding"):
+        if key in metadata:
+            stable[key] = metadata[key]
+    return hashlib.sha256(json.dumps(stable, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest(), argv
+
+
+_APP_SERVER_DIGESTS = {"spec_digest", "native_terminal_digest", "steer_evidence_digest", "evidence_digest"}
+_APP_SERVER_SHUTDOWN_CODES = {"control_lost", "unknown", "appserver_shutdown_forced", "appserver_shutdown_incomplete"}
+_APP_SERVER_RUNTIME_ERRORS = {"appserver_auth_required", "appserver_connection_lost", "appserver_disabled",
+    "appserver_evidence_limit", "appserver_mailbox_finalize_failed", "appserver_pipe_lost", "appserver_policy_mismatch",
+    "appserver_protocol_invalid", "appserver_protocol_io_failed", "appserver_response_write_failed",
+    "appserver_rpc_rejected", "appserver_runtime_failed", "appserver_shutdown_incomplete"}
+
+
+def _safe_appserver_evidence(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or value.get("transport") != codex_app_server.TRANSPORT:
+        return None
+    safe: dict[str, Any] = {"transport": codex_app_server.TRANSPORT}
+    for key in _APP_SERVER_DIGESTS:
+        item = value.get(key)
+        if isinstance(item, str) and re.fullmatch(r"[a-f0-9]{64}", item):
+            safe[key] = item
+    if type(value.get("input_set_uncertain")) is bool:
+        safe["input_set_uncertain"] = value["input_set_uncertain"]
+    for key in ("steer_count", "recorded_steer_count", "approval_request_count"):
+        if type(value.get(key)) is int and 0 <= value[key] <= 1_000_000:
+            safe[key] = value[key]
+    if isinstance(value.get("native_outcome"), str) and value["native_outcome"] in {"completed", "failed", "interrupted"}:
+        safe["native_outcome"] = value["native_outcome"]
+    if isinstance(value.get("shutdown_code"), str) and value["shutdown_code"] in _APP_SERVER_SHUTDOWN_CODES:
+        safe["shutdown_code"] = value["shutdown_code"]
+    elif "shutdown_code" in value and value["shutdown_code"] is None:
+        safe["shutdown_code"] = None
+    if value.get("policy_code") == "policy_unexpected_request":
+        safe["policy_code"] = "policy_unexpected_request"
+    if isinstance(value.get("turn_id"), str) and SOURCE_ID_RE.fullmatch(value["turn_id"]):
+        safe["turn_id"] = value["turn_id"]
+    return safe
+
+
+def _decode_appserver_evidence(raw: Any) -> dict[str, Any] | None:
+    try:
+        return _safe_appserver_evidence(json.loads(raw or "null"))
+    except (ValueError, TypeError, RecursionError):
+        return None
+
+
+def _appserver_process_facts(metadata: dict[str, Any], state: str) -> tuple[str, int | None, str]:
+    status, exit_code, _ = _process_facts(metadata, "result_pending")
+    runtime = metadata.get("app_server_runtime") or {}
+    if isinstance(runtime.get("shutdown_code"), str) and runtime["shutdown_code"] in {"worker_lost", "control_lost", "child_alive"}:
+        status = "unknown"
+    if status in {"starting", "running", "stopping"}:
+        from .jobs import identity
+        if identity(metadata.get("worker_pid"), metadata.get("worker_create_time")) != "alive":
+            status = "unknown"
+    return status, exit_code, "succeeded" if state == "succeeded" else "failed" if state == "failed" else "unknown"
+
+
+def _observe_appserver_job(metadata: dict[str, Any], job_id: str, directory: Path, runtime_root: Path,
+                           previous: dict[str, Any] | None, now: float, byte_limit: int) -> tuple[dict[str, Any], int]:
+    """The app-server journal alone proves the turn; process shutdown is separate."""
+    from . import job_steering
+    identity, _ = _validated_appserver_metadata(metadata, job_id, directory, runtime_root)
+    base: dict[str, Any] = {"job_id": job_id, "observed_at": now, "launch_identity": identity,
+        "stdout_ref": f"jobs/{job_id}/appserver.rpc.jsonl", "result_state": "pending", "turn_status": "unknown",
+        "execution_status": "unknown", "error_code": None}
+    base["process_status"], base["exit_code"], _ = _appserver_process_facts(metadata, "result_pending")
+    if previous and previous.get("launch_identity") and previous["launch_identity"] != identity:
+        return {**base, "result_state": "conflict", "error_code": "launch_identity_conflict", "reuse": True}, 0
+    path = directory / "appserver.rpc.jsonl"
+    try:
+        data, stat = _read_stable_file(path, min(codex_app_server.MAX_JOURNAL_BYTES, max(0, byte_limit)))
+    except SupervisorError as exc:
+        code = ("poll_byte_budget" if exc.code == "file_too_large" and byte_limit < codex_app_server.MAX_JOURNAL_BYTES
+                else "rpc_journal_missing" if exc.code == "file_missing" else exc.code)
+        return {**base, "error_code": code}, exc.bytes_read
+    runtime = metadata.get("app_server_runtime") or {}
+    try:
+        steering = job_steering.steer_evidence(directory)
+    except (OSError, ValueError, TypeError, RecursionError):
+        steering = {"unavailable": True}
+    parsed = codex_app_server.parse_appserver_journal(data, metadata["app_server"],
+        expected_thread_id=runtime.get("thread_id"), expected_turn_id=runtime.get("turn_id"), steer_evidence=steering)
+    # Some malformed wire frames cannot themselves be journaled.  A runtime
+    # failure remains authoritative even if earlier native turn proof was valid.
+    if runtime.get("runtime_error_code"):
+        code = runtime["runtime_error_code"]
+        parsed.update(state="failed", code=code if isinstance(code, str) and code in _APP_SERVER_RUNTIME_ERRORS else "appserver_runtime_failed")
+    if (parsed.get("state") == "succeeded" and (metadata.get("status") not in {"exited", "failed", "stopped"}
+            or runtime.get("connection_state") in {"connecting", "connected"})):
+        # The reader can still discover a fatal post-terminal frame.  Only the
+        # worker's final close makes the journal suitable for an outbox handoff.
+        parsed.update(state="result_pending", code="appserver_journal_open")
+    evidence = _safe_appserver_evidence({**parsed, "shutdown_code": runtime.get("shutdown_code", "unknown")})
+    state = parsed.get("state")
+    base["process_status"], base["exit_code"], base["execution_status"] = _appserver_process_facts(metadata, state)
+    base.update(thread_id=parsed.get("thread_id"), final_item_id=parsed.get("final_item_id"),
+        result_digest=parsed.get("result_digest"), result_text=parsed.get("result_text"),
+        log_digest=hashlib.sha256(data).hexdigest(), log_bytes=len(data),
+        result_state="succeeded" if state == "succeeded" else "failed" if state == "failed" else "pending",
+        turn_status="turn_completed" if parsed.get("native_outcome") == "completed" else
+                    "turn_failed" if parsed.get("native_outcome") in {"failed", "interrupted"} else "unknown",
+        error_code=parsed.get("code"), stdout_size=stat.st_size, stdout_mtime_ns=stat.st_mtime_ns,
+        stdout_file_identity=f"{stat.st_dev}:{stat.st_ino}", app_server_evidence=evidence)
+    if (previous and previous.get("result_state") in {"succeeded", "failed"}
+            and (previous.get("result_digest") != base.get("result_digest")
+                 or previous.get("thread_id") != base.get("thread_id")
+                 or previous.get("final_item_id") != base.get("final_item_id"))):
+        base.update(result_state="conflict", error_code="result_identity_conflict", reuse=True)
+    return base, len(data)
+
+
+def _process_facts(metadata: dict[str, Any], parsed_state: str) -> tuple[str, int | None, str]:
+    raw_status = metadata.get("status")
+    process_status = raw_status if isinstance(raw_status, str) and raw_status in {
+        "starting", "running", "stopping", "exited", "failed", "stopped", "lost", "unknown", "not_launched"
+    } else "unknown"
+    raw_exit = metadata.get("exit_code")
+    exit_code = raw_exit if type(raw_exit) is int else None
+    if parsed_state == "failed":
+        execution = "failed"
+    elif parsed_state != "succeeded":
+        execution = "unknown"
+    elif process_status == "exited" and exit_code == 0:
+        execution = "succeeded"
+    elif process_status in {"failed", "stopped", "not_launched"} or (process_status == "exited" and exit_code is not None and exit_code != 0):
+        execution = "failed"
+    else:
+        execution = "unknown"
+    return process_status, exit_code, execution
+
+
+_GATEWAY_TERMINAL_PROCESS = frozenset({"exited", "failed", "stopped"})
+_GATEWAY_TERMINAL_HINT_BOOST = 1 << 62
+
+
+def _gateway_priority_hint(job_id: str, directory: Path, previous: dict[str, Any] | None,
+                           resolved_jobs: Path) -> int | None:
+    """Return a recency hint for new/changed verified candidates; stat never proves a result."""
+    try:
+        _validate_gateway_job_directory(directory, resolved_jobs)
+    except SupervisorError:
+        return None
+    try:
+        metadata_stat = _safe_stat(directory / "metadata.json")
+    except SupervisorError:
+        return None
+    # The discriminator chooses a separate journal; stdout never selects a transport.
+    try:
+        raw_candidate, _ = _read_stable_file(directory / "metadata.json", GATEWAY_METADATA_MAX_BYTES)
+        candidate = json.loads(raw_candidate.decode("utf-8", errors="strict"))
+        if isinstance(candidate, dict) and candidate.get("transport") == codex_app_server.TRANSPORT:
+            identity, _ = _validated_appserver_metadata(candidate, job_id, directory, directory.parent.parent)
+            if previous and previous.get("result_state") == "conflict":
+                return None
+            try:
+                journal_stat = _safe_stat(directory / "appserver.rpc.jsonl")
+            except SupervisorError:
+                journal_stat = None
+            changed = bool(previous is None or identity != previous.get("launch_identity")
+                or (journal_stat and (journal_stat.st_size != previous.get("stdout_size")
+                    or journal_stat.st_mtime_ns != previous.get("stdout_mtime_ns"))))
+            status, exit_code, _ = _appserver_process_facts(candidate, "result_pending")
+            changed = changed or bool(previous and (previous.get("process_status") != status or previous.get("exit_code") != exit_code))
+            return max(metadata_stat.st_mtime_ns, journal_stat.st_mtime_ns if journal_stat else 0) if changed else None
+    except (SupervisorError, UnicodeDecodeError, ValueError, RecursionError):
+        return None
+    try:
+        stdout_stat = _safe_stat(directory / "stdout.log")
+    except SupervisorError:
+        stdout_stat = None
+
+    if previous is None:
+        try:
+            raw, _ = _read_stable_file(directory / "metadata.json", GATEWAY_METADATA_MAX_BYTES)
+            metadata = json.loads(raw.decode("utf-8", errors="strict"))
+        except (SupervisorError, UnicodeDecodeError, ValueError, RecursionError):
+            return None
+        if not isinstance(metadata, dict) or metadata.get("job_id") != job_id or not _looks_like_codex_exec(metadata.get("command")):
+            return None
+        return max(metadata_stat.st_mtime_ns, stdout_stat.st_mtime_ns if stdout_stat else 0)
+
+    # A changed stat must not reopen a pinned conflict or an authorization/binding denial.
+    if (previous.get("result_state") == "conflict" or not previous.get("launch_identity")
+            or previous.get("error_code") in {
+                "permission_denied", "denied", "not_found", "binding_mismatch",
+                "launch_identity_conflict", "result_identity_conflict",
+            }):
+        return None
+    stdout_changed = bool(stdout_stat and (
+        previous.get("stdout_size") != stdout_stat.st_size
+        or previous.get("stdout_mtime_ns") != stdout_stat.st_mtime_ns
+        or previous.get("stdout_file_identity") != f"{stdout_stat.st_dev}:{stdout_stat.st_ino}"
+    ))
+    try:
+        raw, _ = _read_stable_file(directory / "metadata.json", GATEWAY_METADATA_MAX_BYTES)
+        metadata = json.loads(raw.decode("utf-8", errors="strict"))
+        if not isinstance(metadata, dict):
+            return None
+        identity, _ = _validated_gateway_metadata(metadata, job_id, directory, directory.parent.parent)
+        process_status, exit_code, _ = _process_facts(metadata, "unknown")
+    except (SupervisorError, UnicodeDecodeError, ValueError, RecursionError):
+        return None
+    metadata_changed = (identity != previous.get("launch_identity")
+                        or process_status != previous.get("process_status")
+                        or exit_code != previous.get("exit_code"))
+    if not stdout_changed and not metadata_changed:
+        return None
+    hint = max(metadata_stat.st_mtime_ns, stdout_stat.st_mtime_ns if stdout_stat else 0)
+    # A running->terminal transition outranks streaming jobs, whose stdout mtime is always newer.
+    if (process_status in _GATEWAY_TERMINAL_PROCESS and process_status != previous.get("process_status")
+            and previous.get("process_status") not in _GATEWAY_TERMINAL_PROCESS):
+        hint += _GATEWAY_TERMINAL_HINT_BOOST
+    return hint
+
+
+def _scan_gateway_jobs(cursor: str, previous_rows: dict[str, dict[str, Any]], now: float | None = None) -> dict[str, Any]:
+    """Read a fair, bounded slice of official standalone Codex jobs from the D80 runtime."""
+    from . import jobs
+
+    now = time.time() if now is None else now
+    runtime = jobs.runtime_root()
+    jobs_root = runtime / "jobs"
+    if not jobs_root.exists():
+        return {"observations": [], "cursor": cursor, "summary": {"discovered": 0, "observed": 0, "pending": 0,
+                "conflicts": 0, "handoffs": 0, "errors": [{"job_id": "runtime", "code": "jobs_path_missing"}]},
+                "active": 0, "lower_bound": False}
+    if jobs_root.is_symlink():
+        raise SupervisorError("jobs_path_invalid")
+    try:
+        resolved_jobs = jobs_root.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise SupervisorError("jobs_path_invalid") from None
+    if not _inside(resolved_jobs, runtime) or resolved_jobs != runtime / "jobs":
+        raise SupervisorError("jobs_path_invalid")
+    ids = []
+    for entry in jobs_root.iterdir():
+        if not entry.is_dir() or entry.is_symlink():
+            continue
+        try:
+            canonical = str(__import__("uuid").UUID(entry.name)).lower()
+        except (ValueError, AttributeError):
+            continue
+        if canonical == entry.name:
+            ids.append(canonical)
+    ids.sort()
+    discovered = len(ids)
+    if ids and cursor in ids:
+        offset = (ids.index(cursor) + 1) % len(ids)
+        ordered = ids[offset:] + ids[:offset]
+    else:
+        ordered = ids
+    job_limit = max(0, GATEWAY_MAX_JOBS_PER_POLL)
+    priority_limit = min(len(ids), job_limit // 2)
+    if job_limit == 1:
+        # A one-job test/deployment slice remains history-first so its cursor always moves.
+        priority_limit = 0
+    priority_hints: list[tuple[int, str]] = []
+    for job_id in ids:
+        hint = _gateway_priority_hint(job_id, jobs_root / job_id, previous_rows.get(job_id), resolved_jobs)
+        if hint is not None:
+            priority_hints.append((hint, job_id))
+    priority_hints.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    priority_ids = [job_id for _, job_id in priority_hints[:priority_limit]]
+    priority_set = set(priority_ids)
+    history_limit = max(0, job_limit - len(priority_ids))
+    history_ids = [job_id for job_id in ordered if job_id not in priority_set][:history_limit]
+    selected = priority_ids + history_ids
+    selected_lane = {job_id: "priority" for job_id in priority_ids}
+    selected_lane.update({job_id: "history" for job_id in history_ids})
+    lower_bound = len(ordered) > len(selected)
+    summary = {"discovered": discovered, "observed": 0, "pending": 0, "conflicts": 0, "handoffs": 0, "errors": []}
+    observations: list[dict[str, Any]] = []
+    total_bytes = 0
+    priority_bytes = 0
+    priority_byte_budget = int(GATEWAY_MAX_BYTES_PER_POLL * GATEWAY_PRIORITY_SHARE)
+    active = 0
+    last_history_consumed_id: str | None = None
+    history_byte_defer_cursor: str | None = None
+    for job_id in selected:
+        lane = selected_lane[job_id]
+        summary["observed"] += 1
+        directory = jobs_root / job_id
+        previous = previous_rows.get(job_id)
+        base: dict[str, Any] = {"job_id": job_id, "observed_at": now, "stdout_ref": f"jobs/{job_id}/stdout.log"}
+        try:
+            _validate_gateway_job_directory(directory, resolved_jobs)
+            metadata_path = directory / "metadata.json"
+            meta_stat = _safe_stat(metadata_path)
+            raw_metadata, after_metadata = _read_stable_file(metadata_path, GATEWAY_METADATA_MAX_BYTES)
+            if not _same_stat(meta_stat, after_metadata):
+                raise SupervisorError("metadata_changed")
+            try:
+                metadata = json.loads(raw_metadata.decode("utf-8", errors="strict"))
+            except (UnicodeDecodeError, ValueError, RecursionError):
+                raise SupervisorError("metadata_invalid") from None
+            if not isinstance(metadata, dict):
+                continue
+            if metadata.get("transport") != codex_app_server.TRANSPORT and ("app_server" in metadata or _pinned_appserver_transport(metadata)):
+                raise SupervisorError("app_server_transport_mismatch")
+            if metadata.get("transport") == codex_app_server.TRANSPORT:
+                base["stdout_ref"] = f"jobs/{job_id}/appserver.rpc.jsonl"
+                available = (min(GATEWAY_MAX_BYTES_PER_POLL - total_bytes, priority_byte_budget - priority_bytes)
+                             if lane == "priority" else GATEWAY_MAX_BYTES_PER_POLL - total_bytes)
+                observation, consumed = _observe_appserver_job(metadata, job_id, directory, runtime, previous, now, available)
+                total_bytes += consumed
+                if lane == "priority":
+                    priority_bytes += consumed
+                else:
+                    last_history_consumed_id = job_id
+                if observation.get("process_status") in {"starting", "running", "stopping"}:
+                    active += 1
+                if observation.get("result_state") == "pending":
+                    summary["pending"] += 1
+                elif observation.get("result_state") == "conflict":
+                    summary["conflicts"] += 1
+                if observation.get("error_code"):
+                    summary["errors"].append({"job_id": job_id, "code": observation["error_code"]})
+                observations.append(observation)
+                continue
+            if metadata.get("status") in {"starting", "running", "stopping"}:
+                active += 1
+            if not _looks_like_codex_exec(metadata.get("command")):
+                continue
+            identity, _argv = _validated_gateway_metadata(metadata, job_id, directory, runtime)
+            base.update(launch_identity=identity, process_status="unknown", exit_code=None,
+                        turn_status="unknown", execution_status="unknown", result_state="pending", error_code=None)
+            base["process_status"], base["exit_code"], _ = _process_facts(metadata, "unknown")
+            if previous and previous.get("launch_identity") and previous["launch_identity"] != identity:
+                base.update(result_state="conflict", error_code="launch_identity_conflict", reuse=True)
+                summary["conflicts"] += 1
+                summary["errors"].append({"job_id": job_id, "code": "launch_identity_conflict"})
+                observations.append(base)
+                continue
+            stdout_path = directory / "stdout.log"
+            try:
+                stdout_stat = _safe_stat(stdout_path)
+            except SupervisorError as exc:
+                base["error_code"] = "stdout_missing" if exc.code == "file_missing" else exc.code
+                base["stdout_size"] = None
+                base["stdout_mtime_ns"] = None
+                summary["pending"] += 1
+                summary["errors"].append({"job_id": job_id, "code": base["error_code"]})
+                observations.append(base)
+                continue
+            file_identity = f"{stdout_stat.st_dev}:{stdout_stat.st_ino}"
+            base.update(stdout_size=stdout_stat.st_size, stdout_mtime_ns=stdout_stat.st_mtime_ns,
+                        stdout_file_identity=file_identity)
+            same_log = bool(previous and previous.get("stdout_size") == stdout_stat.st_size
+                            and previous.get("stdout_mtime_ns") == stdout_stat.st_mtime_ns
+                            and previous.get("stdout_file_identity") == file_identity)
+            same_launch = bool(previous and previous.get("launch_identity") == identity)
+            status_changed = bool(previous and previous.get("process_status") != base["process_status"])
+            if same_log and same_launch and previous.get("result_state") in {"succeeded", "failed", "conflict"}:
+                base.update({k: previous.get(k) for k in ("thread_id", "final_item_id", "result_digest", "log_digest", "log_bytes",
+                              "turn_status", "execution_status", "result_state", "error_code", "handoff_id")})
+                base["process_status"], base["exit_code"], base["execution_status"] = _process_facts(
+                    metadata, "failed" if previous.get("turn_status") == "turn_failed" else
+                    ("succeeded" if previous.get("turn_status") == "turn_completed" else "result_pending"))
+                if base["execution_status"] == "failed":
+                    base["error_code"] = "nonzero_exit" if base["exit_code"] not in (None, 0) else "process_failed"
+                base["reuse"] = True
+                observations.append(base)
+                continue
+            stdout_changed = not same_log
+            changed_stdout_is_retryable = bool(
+                previous and previous.get("log_digest") and previous.get("log_bytes") is not None
+                and previous.get("error_code") in GATEWAY_STDOUT_CHANGE_RETRY_CODES
+            )
+            if (same_launch and previous and previous.get("result_state") == "pending" and previous.get("next_check_at")
+                    and previous["next_check_at"] > now and not status_changed
+                    and not (stdout_changed and changed_stdout_is_retryable)):
+                base.update({k: previous.get(k) for k in ("thread_id", "final_item_id", "result_digest", "log_digest", "log_bytes",
+                              "turn_status", "execution_status", "result_state", "error_code", "handoff_id")})
+                base["reuse"] = True
+                summary["pending"] += 1
+                summary["errors"].append({"job_id": job_id, "code": previous.get("error_code") or "result_pending"})
+                observations.append(base)
+                continue
+            if stdout_stat.st_size > GATEWAY_MAX_FILE_BYTES:
+                base.update(error_code="result_too_large", result_state="pending", turn_status="unknown", execution_status="unknown",
+                            log_digest=None, log_bytes=stdout_stat.st_size)
+                summary["pending"] += 1
+                summary["errors"].append({"job_id": job_id, "code": "result_too_large"})
+                if previous and previous.get("result_state") in {"succeeded", "failed"}:
+                    base.update(result_state="conflict", error_code="result_identity_conflict", reuse=True)
+                    summary["conflicts"] += 1
+                observations.append(base)
+                continue
+            available_bytes = (min(GATEWAY_MAX_BYTES_PER_POLL - total_bytes,
+                                   priority_byte_budget - priority_bytes)
+                               if lane == "priority" else GATEWAY_MAX_BYTES_PER_POLL - total_bytes)
+            if stdout_stat.st_size > available_bytes:
+                base.update(error_code="poll_byte_budget", result_state="pending", turn_status="unknown", execution_status="unknown",
+                            reuse=True)
+                if previous and previous.get("result_state") in {"succeeded", "failed"}:
+                    base.update(result_state="conflict", error_code="result_identity_conflict")
+                    summary["conflicts"] += 1
+                if lane == "history" and history_byte_defer_cursor is None:
+                    history_byte_defer_cursor = last_history_consumed_id or job_id
+                summary["pending"] += 1
+                summary["errors"].append({"job_id": job_id, "code": "poll_byte_budget"})
+                if previous and previous.get("result_state") in {"succeeded", "failed"}:
+                    base.update(result_state="conflict", error_code="result_identity_conflict")
+                    summary["conflicts"] += 1
+                observations.append(base)
+                continue
+            available_bytes = (min(GATEWAY_MAX_BYTES_PER_POLL - total_bytes,
+                                   priority_byte_budget - priority_bytes)
+                               if lane == "priority" else GATEWAY_MAX_BYTES_PER_POLL - total_bytes)
+            read_limit = min(GATEWAY_MAX_FILE_BYTES, max(0, available_bytes))
+            try:
+                data, read_stat = _read_stable_file(stdout_path, read_limit)
+            except SupervisorError as exc:
+                total_bytes += exc.bytes_read
+                if lane == "priority":
+                    priority_bytes += exc.bytes_read
+                elif exc.bytes_read:
+                    last_history_consumed_id = job_id
+                budget_overrun = ((exc.code == "file_too_large" and read_limit < GATEWAY_MAX_FILE_BYTES)
+                                  or (exc.code == "file_changed" and read_limit < GATEWAY_MAX_FILE_BYTES
+                                      and exc.bytes_read >= read_limit))
+                code = "poll_byte_budget" if budget_overrun else exc.code
+                base.update(error_code=code, result_state="pending", turn_status="unknown", execution_status="unknown",
+                            reuse=budget_overrun)
+                if budget_overrun and lane == "history" and history_byte_defer_cursor is None:
+                    history_byte_defer_cursor = last_history_consumed_id or job_id
+                if previous and previous.get("result_state") in {"succeeded", "failed"} and not same_log:
+                    base.update(result_state="conflict", error_code="result_identity_conflict", reuse=True)
+                    summary["conflicts"] += 1
+                    code = "result_identity_conflict"
+                summary["pending"] += 1
+                summary["errors"].append({"job_id": job_id, "code": code})
+                observations.append(base)
+                continue
+            total_bytes += len(data)
+            if lane == "priority":
+                priority_bytes += len(data)
+            else:
+                last_history_consumed_id = job_id
+            raw_digest = hashlib.sha256(data).hexdigest()
+            if previous and previous.get("result_state") in {"succeeded", "failed"} and previous.get("log_digest") != raw_digest:
+                base.update(result_state="conflict", error_code="result_identity_conflict", log_digest=raw_digest,
+                            log_bytes=len(data), reuse=True)
+                summary["conflicts"] += 1
+                summary["errors"].append({"job_id": job_id, "code": "result_identity_conflict"})
+                observations.append(base)
+                continue
+            if not data.endswith(b"\n"):
+                parsed = {"state": "result_pending", "code": "partial_jsonl"}
+            else:
+                parsed = work_dispatcher_codex.parse_codex_jsonl(data)
+            if parsed.get("state") == "succeeded" and not (isinstance(parsed.get("final_item_id"), str) and parsed["final_item_id"]):
+                parsed = {"state": "result_pending", "code": "final_item_identity_missing"}
+            state = parsed.get("state")
+            turn = "turn_completed" if state == "succeeded" else "turn_failed" if state == "failed" else "unknown"
+            process_status, exit_code, execution_status = _process_facts(metadata, state)
+            base.update(thread_id=parsed.get("thread_id"), final_item_id=parsed.get("final_item_id"),
+                        result_digest=parsed.get("result_digest"), log_digest=raw_digest, log_bytes=len(data),
+                        turn_status=turn, process_status=process_status, exit_code=exit_code,
+                        execution_status=execution_status,
+                        result_state="succeeded" if state == "succeeded" else "failed" if state == "failed" else "pending",
+                        result_text=parsed.get("result_text"), error_code=None if state == "succeeded" else parsed.get("code") or "result_pending",
+                        stdout_size=read_stat.st_size, stdout_mtime_ns=read_stat.st_mtime_ns,
+                        stdout_file_identity=f"{read_stat.st_dev}:{read_stat.st_ino}")
+            if state == "succeeded" and execution_status == "failed":
+                base["error_code"] = "nonzero_exit" if exit_code not in (None, 0) else "process_failed"
+            if state != "succeeded":
+                if state == "result_pending":
+                    summary["pending"] += 1
+                    summary["errors"].append({"job_id": job_id, "code": base["error_code"]})
+            observations.append(base)
+        except SupervisorError as exc:
+            code = exc.code
+            base.update(result_state="pending", turn_status="unknown", execution_status="unknown", error_code=code)
+            if previous and previous.get("result_state") in {"succeeded", "failed"}:
+                base.update(result_state="conflict", error_code="result_identity_conflict", reuse=True)
+                summary["conflicts"] += 1
+                code = "result_identity_conflict"
+            summary["pending"] += 1
+            summary["errors"].append({"job_id": job_id, "code": code})
+            observations.append(base)
+        except (OSError, ValueError, TypeError, RecursionError):
+            base.update(result_state="pending", turn_status="unknown", execution_status="unknown", error_code="observation_invalid")
+            summary["pending"] += 1
+            summary["errors"].append({"job_id": job_id, "code": "observation_invalid"})
+            observations.append(base)
+    next_cursor = (history_byte_defer_cursor if history_byte_defer_cursor is not None else
+                   history_ids[-1] if history_ids else cursor)
+    return {"observations": observations, "cursor": next_cursor, "summary": summary,
+            "active": active, "lower_bound": lower_bound}
+
+
+def _terminal_revisits(out: Fetched, plan: dict[str, Any], now: float) -> tuple[set[str], list[str]]:
+    """Known terminal+drained sessions can continue and finish between two polls, so they are never observed active.
+    A listed change hint (updated_at-like, newer than the last progress we recorded) triggers collection; every other
+    drained session is rechecked in bounded, least-recently-collected-first rotation."""
+    changed: set[str] = set()
+    quiet: list[tuple[float, str]] = []
+    for status in CLI_TERMINAL:
+        for item in out.cli_lists.get(status, []):
+            sid = _session_id(item)
+            row = plan["sessions"].get(sid)
+            if row is None or row["status"] not in CLI_TERMINAL or not row["drained"] or row["cursor_stalled"]:
+                continue                                     # unknown / undrained / failing sessions are handled by _collect
+            hint = next((t for t in (parse_time(item.get(k)) for k in ("updated_at", "last_activity_at", "last_event_at")) if t), None)
+            if hint is not None and hint > (row["last_progress_at"] or 0.0):
+                changed.add(sid)
+            elif now - (row.get("collected_at") or 0.0) >= TERMINAL_RECHECK_SECONDS:
+                quiet.append((row.get("collected_at") or 0.0, sid))
+    return changed, [sid for _, sid in sorted(quiet)[:TERMINAL_RECHECKS_PER_POLL] if sid not in changed]
 
 
 async def fetch_all(plan: dict[str, Any], cli_client: Any, task_client: Any, now: float) -> Fetched:
     out = Fetched(now)
+    out.gateway_cursor = plan.get("gateway_cursor", "")
+    out.gateway_previous = plan.get("gateway_jobs", {})
     await _fetch_cli_lists(cli_client, out)
     await _fetch_cli_status(cli_client, out, plan)
-    # A continued durable session reappears in an active list, so it is collected again even after an ack.
+    # A continued durable session usually reappears in an active list; short follow-ups that finish between polls are
+    # caught by _terminal_revisits instead.
     discovered = {_session_id(i) for status, items in out.cli_lists.items() for i in items
                   if status not in CLI_TERMINAL or _session_id(i) not in plan["sessions"]}
-    await _collect(cli_client, out, plan, discovered)
+    revisit, rechecks = _terminal_revisits(out, plan, now)
+    await _collect(cli_client, out, plan, discovered, revisit, rechecks)
     await _fetch_runs(cli_client, out, plan)
     await _fetch_tasks(task_client, out, plan)
     await _fetch_jobs(out)
+    out.source("aoitalk", ok=True)
     return out
 
 
 async def default_fetch(plan: dict[str, Any]) -> Fetched:
+    observed_at = time.time()
+    def local_only() -> Fetched:
+        out = Fetched(observed_at)
+        out.gateway_cursor = plan.get("gateway_cursor", "")
+        out.gateway_previous = plan.get("gateway_jobs", {})
+        return out
+
     try:
         settings = aoitalk.load_settings()
     except aoitalk.ClipError:
-        raise SupervisorError("configuration_error") from None
+        out = local_only()
+        await _fetch_jobs(out)
+        out.source("aoitalk", ok=False, error="configuration_error")
+        return out
     cli_client, task_client = cli.CliSessionClient(settings), tasks.TaskClient(settings)
     try:
-        await cli_client.login_cli_session()
-        await task_client.login_task()
-        return await fetch_all(plan, cli_client, task_client, time.time())
+        try:
+            await cli_client.login_cli_session()
+            await task_client.login_task()
+        except Exception as exc:  # noqa: BLE001 - Gateway local observation remains independent
+            out = local_only()
+            await _fetch_jobs(out)
+            out.source("aoitalk", ok=False, error=safe_code(exc))
+            return out
+        out = await fetch_all(plan, cli_client, task_client, observed_at)
+        return out
     finally:
         await cli_client.http.aclose()
         await task_client.http.aclose()
@@ -1039,6 +1850,8 @@ def commit(conn: sqlite3.Connection, fetched: Fetched, plan: dict[str, Any]) -> 
         _commit_runs(conn, fetched, now)
         _commit_tasks(conn, fetched, now)
         _create_handoffs(conn, fetched, now)
+        _commit_gateway(conn, fetched, now, summary)
+        fetched.gateway_summary["handoffs"] = summary.get("gateway_handoffs", 0)
         _correct_handoff_status(conn)
         _settle_runs(conn)
         for name, src in fetched.sources.items():
@@ -1049,6 +1862,8 @@ def commit(conn: sqlite3.Connection, fetched: Fetched, plan: dict[str, Any]) -> 
         snapshot = _snapshot(fetched)
         conn.execute("INSERT INTO snapshots(observed_at,data_json) VALUES(?,?)", (now, json.dumps(snapshot)))
         conn.execute("INSERT OR REPLACE INTO meta VALUES('last_commit_at', ?)", (str(now),))
+        if fetched.gateway_cursor_next is not None:
+            conn.execute("INSERT OR REPLACE INTO meta VALUES('gateway_cursor', ?)", (fetched.gateway_cursor_next,))
         conn.execute("COMMIT")
     except BaseException:
         conn.execute("ROLLBACK")
@@ -1218,6 +2033,120 @@ def _insert_handoff(conn: sqlite3.Connection, *, handoff_id: str, source_type: s
     return bool(created)
 
 
+def _commit_gateway(conn: sqlite3.Connection, f: Fetched, now: float, summary: dict[str, Any]) -> None:
+    """Atomically pin Gateway observation identity and create its ordinary outbox handoff."""
+    for obs in f.gateway_observations:
+        job_id = obs["job_id"]
+        existing = conn.execute("SELECT * FROM gateway_jobs WHERE job_id=?", (job_id,)).fetchone()
+        identity = obs.get("launch_identity")
+        code = obs.get("error_code")
+        incoming_state = obs.get("result_state", "pending")
+        app_evidence = _safe_appserver_evidence(obs.get("app_server_evidence"))
+        if existing is not None and existing["result_state"] == "conflict":
+            code = existing["error_code"] or "result_identity_conflict"
+            conn.execute("UPDATE gateway_jobs SET process_status=?, exit_code=?, observed_at=?, error_code=?,"
+                         " stdout_size=COALESCE(?,stdout_size),stdout_mtime_ns=COALESCE(?,stdout_mtime_ns),"
+                         " stdout_file_identity=COALESCE(?,stdout_file_identity) WHERE job_id=?",
+                         (obs.get("process_status", existing["process_status"]), obs.get("exit_code", existing["exit_code"]), now, code,
+                          obs.get("stdout_size"), obs.get("stdout_mtime_ns"), obs.get("stdout_file_identity"), job_id))
+            continue
+        if existing is not None and existing["launch_identity"] and identity and existing["launch_identity"] != identity:
+            code = "launch_identity_conflict"
+            conn.execute("UPDATE gateway_jobs SET result_state='conflict', process_status=?, exit_code=?, observed_at=?, error_code=?, next_check_at=NULL,"
+                         " stdout_size=COALESCE(?,stdout_size),stdout_mtime_ns=COALESCE(?,stdout_mtime_ns)"
+                         " WHERE job_id=?", (obs.get("process_status", existing["process_status"]), obs.get("exit_code", existing["exit_code"]), now,
+                                             code, obs.get("stdout_size"), obs.get("stdout_mtime_ns"), job_id))
+            summary["gateway_conflicts"] = summary.get("gateway_conflicts", 0) + 1
+            continue
+        if (existing is not None and existing["result_state"] in {"succeeded", "failed"}
+                and incoming_state in {"succeeded", "failed"}
+                and ((app_evidence is None and existing["log_digest"] and obs.get("log_digest") != existing["log_digest"])
+                     or (existing["result_digest"] and obs.get("result_digest") != existing["result_digest"])
+                     or (existing["thread_id"] and obs.get("thread_id") != existing["thread_id"])
+                     or (existing["final_item_id"] and obs.get("final_item_id") != existing["final_item_id"]))):
+            code = "result_identity_conflict"
+            conn.execute("UPDATE gateway_jobs SET result_state='conflict', process_status=?, exit_code=?, observed_at=?, error_code=?, next_check_at=NULL,"
+                         " stdout_size=COALESCE(?,stdout_size),stdout_mtime_ns=COALESCE(?,stdout_mtime_ns),"
+                         " stdout_file_identity=COALESCE(?,stdout_file_identity)"
+                         " WHERE job_id=?", (obs.get("process_status", existing["process_status"]), obs.get("exit_code", existing["exit_code"]), now,
+                                             code, obs.get("stdout_size"), obs.get("stdout_mtime_ns"), obs.get("stdout_file_identity"), job_id))
+            summary["gateway_conflicts"] = summary.get("gateway_conflicts", 0) + 1
+            continue
+        if existing is not None and existing["result_state"] in {"succeeded", "failed"} and incoming_state not in {"conflict"}:
+            # Terminal result identity is immutable. New process metadata may update independently.
+            conn.execute("UPDATE gateway_jobs SET process_status=?, exit_code=?, execution_status=?, observed_at=?, error_code=?,"
+                         " stdout_size=COALESCE(?,stdout_size),stdout_mtime_ns=COALESCE(?,stdout_mtime_ns),"
+                         " stdout_file_identity=COALESCE(?,stdout_file_identity) WHERE job_id=?",
+                         (obs.get("process_status", existing["process_status"]), obs.get("exit_code", existing["exit_code"]),
+                          obs.get("execution_status", existing["execution_status"]), now,
+                          obs.get("error_code") if obs.get("error_code") else existing["error_code"],
+                          obs.get("stdout_size"), obs.get("stdout_mtime_ns"), obs.get("stdout_file_identity"), job_id))
+            if app_evidence is not None:
+                conn.execute("UPDATE gateway_jobs SET app_server_evidence_json=?,log_digest=?,log_bytes=? WHERE job_id=?",
+                             (json.dumps(app_evidence, sort_keys=True), obs.get("log_digest"), obs.get("log_bytes"), job_id))
+            continue
+        if incoming_state == "conflict":
+            code = code or "result_identity_conflict"
+            conn.execute("""INSERT INTO gateway_jobs(job_id,launch_identity,process_status,exit_code,turn_status,execution_status,result_state,
+                         error_code,error_attempts,next_check_at,observed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                         ON CONFLICT(job_id) DO UPDATE SET result_state='conflict',process_status=excluded.process_status,
+                         exit_code=excluded.exit_code,error_code=excluded.error_code,observed_at=excluded.observed_at,next_check_at=NULL,
+                         stdout_size=COALESCE(?,gateway_jobs.stdout_size),stdout_mtime_ns=COALESCE(?,gateway_jobs.stdout_mtime_ns),
+                         stdout_file_identity=COALESCE(?,gateway_jobs.stdout_file_identity)""",
+                         (job_id, identity, obs.get("process_status", "unknown"), obs.get("exit_code"), "unknown", "unknown",
+                          "conflict", code, 0, None, now, obs.get("stdout_size"), obs.get("stdout_mtime_ns"),
+                          obs.get("stdout_file_identity")))
+            summary["gateway_conflicts"] = summary.get("gateway_conflicts", 0) + 1
+            continue
+        text = obs.get("result_text")
+        if incoming_state == "succeeded":
+            if not isinstance(text, str):
+                incoming_state, code = "pending", "result_text_missing"
+            else:
+                try:
+                    calculated = hashlib.sha256(text.encode("utf-8", errors="strict")).hexdigest()
+                except UnicodeEncodeError:
+                    calculated = ""
+                if not calculated or calculated != obs.get("result_digest"):
+                    incoming_state, code = "pending", "result_digest_mismatch"
+        if existing is None:
+            attempts = 0
+        else:
+            attempts = existing["error_attempts"]
+        if incoming_state == "pending" and not obs.get("reuse"):
+            attempts += 1
+        wait = min(3600.0, GATEWAY_BACKOFF_SECONDS * 2 ** min(max(0, attempts - 1), 7)) if incoming_state == "pending" else None
+        next_check_at = (existing["next_check_at"] if obs.get("reuse") and existing is not None
+                         else now + wait if wait else None)
+        handoff_id = f"gateway-codex:{job_id}:{obs['thread_id']}" if incoming_state == "succeeded" else None
+        values = (job_id, identity or (existing["launch_identity"] if existing else None), obs.get("thread_id"), obs.get("final_item_id"),
+                  obs.get("result_digest"), obs.get("log_digest"), obs.get("log_bytes"), obs.get("stdout_ref"),
+                  obs.get("stdout_size"), obs.get("stdout_mtime_ns"), obs.get("stdout_file_identity"),
+                  obs.get("process_status", "unknown"), obs.get("exit_code"),
+                  obs.get("turn_status", "unknown"), obs.get("execution_status", "unknown"), incoming_state, code,
+                  attempts, next_check_at, now, handoff_id)
+        conn.execute("""INSERT INTO gateway_jobs(job_id,launch_identity,thread_id,final_item_id,result_digest,log_digest,log_bytes,stdout_ref,
+                     stdout_size,stdout_mtime_ns,stdout_file_identity,process_status,exit_code,turn_status,execution_status,result_state,error_code,error_attempts,
+                     next_check_at,observed_at,handoff_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     ON CONFLICT(job_id) DO UPDATE SET launch_identity=COALESCE(gateway_jobs.launch_identity,excluded.launch_identity),
+                     thread_id=excluded.thread_id,final_item_id=excluded.final_item_id,result_digest=excluded.result_digest,
+                     log_digest=excluded.log_digest,log_bytes=excluded.log_bytes,stdout_ref=excluded.stdout_ref,
+                     stdout_size=excluded.stdout_size,stdout_mtime_ns=excluded.stdout_mtime_ns,
+                     stdout_file_identity=excluded.stdout_file_identity,process_status=excluded.process_status,
+                     exit_code=excluded.exit_code,turn_status=excluded.turn_status,execution_status=excluded.execution_status,
+                     result_state=excluded.result_state,error_code=excluded.error_code,error_attempts=excluded.error_attempts,
+                     next_check_at=excluded.next_check_at,observed_at=excluded.observed_at,handoff_id=COALESCE(gateway_jobs.handoff_id,excluded.handoff_id)""", values)
+        if app_evidence is not None:
+            conn.execute("UPDATE gateway_jobs SET app_server_evidence_json=? WHERE job_id=?",
+                         (json.dumps(app_evidence, sort_keys=True), job_id))
+        if incoming_state == "succeeded" and handoff_id:
+            created = _insert_handoff(conn, handoff_id=handoff_id, source_type="gateway_codex", source_id=job_id,
+                                      provider="codex-cli", status="turn_completed", now=now,
+                                      text=text, source="gateway_codex_appserver" if app_evidence is not None else "gateway_codex_jsonl")
+            if created:
+                summary["gateway_handoffs"] = summary.get("gateway_handoffs", 0) + 1
+
+
 def _create_handoffs(conn: sqlite3.Connection, f: Fetched, now: float) -> None:
     """A handoff exists per (session, run, assistant message): the run's own terminal authority AND a fully
     validated message.  Other runs of the same session (queued/running) neither block nor lend their state."""
@@ -1261,7 +2190,28 @@ def _snapshot(f: Fetched) -> dict[str, Any]:
             entry["session_projection"][state] = None if listed is None else sum(1 for i in listed if i.get("provider") == name)
             entry["session_projection"][f"{state}_lower_bound"] = bool(bound and listed is not None)
     task_counts = {s: (len(f.task_lists[s]) if s in f.task_lists else None) for s in TASK_ACTIVE}
-    return {"providers": providers, "tasks": task_counts, "sources": f.sources, "jobs": f.jobs}
+    return {"providers": providers, "tasks": task_counts, "sources": f.sources, "jobs": f.jobs,
+            "gateway_codex": f.gateway_summary}
+
+
+def _gateway_provenance(row: Any) -> dict[str, Any] | None:
+    if row is None or row["gateway_job_id"] is None:
+        return None
+    result = {"job_id": row["gateway_job_id"], "thread_id": row["thread_id"], "final_item_id": row["final_item_id"],
+            "process_status": row["process_status"], "exit_code": row["exit_code"],
+            "turn_status": row["turn_status"], "execution_status": row["execution_status"],
+            "result_state": row["result_state"], "result_digest": row["gateway_result_digest"],
+            "log_digest": row["gateway_log_digest"],
+            "log_bytes": row["log_bytes"], "stdout_ref": row["stdout_ref"],
+            "observed_at": iso(row["gateway_observed_at"]), "error_code": row["gateway_error_code"]}
+    if "app_server_evidence_json" in row.keys():
+        try:
+            safe = _safe_appserver_evidence(json.loads(row["app_server_evidence_json"] or "null"))
+        except (ValueError, TypeError, RecursionError):
+            safe = None
+        if safe is not None:
+            result["app_server"] = safe
+    return result
 
 
 # ------------------------------------------------------------------- user commands
@@ -1350,8 +2300,12 @@ def pending_view(conn: sqlite3.Connection, now: float, *, cursor: int = 0, limit
     ``next_cursor`` is a stable outbox sequence, so paging is repeatable and an omitted page is never "done"."""
     limit = max(1, min(int(limit), 100))
     cursor = max(0, int(cursor))
-    rows = conn.execute("SELECT o.*, h.state AS handoff_state, h.terminal_status, h.provider, h.result_source, h.result_text"
-                        " FROM outbox o JOIN handoffs h USING(handoff_id)"
+    rows = conn.execute("SELECT o.*, h.state AS handoff_state, h.terminal_status, h.provider, h.result_source, h.result_text,"
+                        " g.job_id AS gateway_job_id, g.thread_id, g.final_item_id, g.process_status, g.exit_code, g.turn_status,"
+                        " g.execution_status, g.result_state, g.result_digest AS gateway_result_digest,"
+                        " g.log_digest AS gateway_log_digest, g.log_bytes, g.stdout_ref,g.app_server_evidence_json,"
+                        " g.observed_at AS gateway_observed_at, g.error_code AS gateway_error_code"
+                        " FROM outbox o JOIN handoffs h USING(handoff_id) LEFT JOIN gateway_jobs g USING(handoff_id)"
                         " WHERE o.delivery_state='pending' AND o.seq>? ORDER BY o.seq LIMIT ?", (cursor, limit + 1)).fetchall()
     page = rows[:limit]
     total = conn.execute("SELECT COUNT(*) FROM outbox WHERE delivery_state='pending'").fetchone()[0]
@@ -1364,7 +2318,9 @@ def pending_view(conn: sqlite3.Connection, now: float, *, cursor: int = 0, limit
                    "run_id": r["run_id"], "message_id": r["message_id"], "provider": r["provider"],
                    "terminal_status": r["terminal_status"], "result_source": r["result_source"], "result_digest": r["result_digest"],
                    "result_chars": r["result_chars"], "created_at": iso(r["created_at"]), "delivery_state": r["delivery_state"],
-                   "result_preview": (r["result_text"] or "")[:200], "fetch": f"show {r['handoff_id']}"} for r in page],
+                   "result_preview": None if r["source_type"] == "gateway_codex" else (r["result_text"] or "")[:200],
+                   "gateway_provenance": _gateway_provenance(r),
+                   "fetch": f"show {r['handoff_id']}"} for r in page],
         "received_not_acked": conn.execute("SELECT COUNT(*) FROM outbox o JOIN handoffs h USING(handoff_id)"
                                            " WHERE o.delivery_state='received' AND h.state='ready'").fetchone()[0],
         "blockers": [{k: a[k] for k in ("code", "subject", "severity", "count", "items") if k in a} for a in status["alerts"]][:50],
@@ -1492,7 +2448,9 @@ def build_status(conn: sqlite3.Connection, now: float, *, interval: float = POLL
         for name, src in snap.get("sources", {}).items():
             seen = src.get("observed_at")
             sources[name] = {**src, "age_seconds": None if seen is None else round(max(0.0, now - seen), 1),
-                             "fresh": seen is not None and now - seen <= window}
+                             "fresh": seen is not None and now - seen <= window
+                             and not (name in {"jobs", "gateway_codex", "aoitalk"}
+                                      and (src.get("error") or not src.get("complete")))}
         if not snapshot_fresh:
             alert("observer_stale", severity="error")
     if cycle["state"] == "failing":
@@ -1628,11 +2586,32 @@ def build_status(conn: sqlite3.Connection, now: float, *, interval: float = POLL
               "provider": r["provider"], "terminal_status": r["terminal_status"], "created_at": iso(r["created_at"]),
               "run_id": r["run_id"], "message_id": r["message_id"], "result_source": r["result_source"],
               "result_digest": r["result_digest"], "delivery_state": r["delivery_state"],
-              "result_chars": len(r["result_text"] or ""), "result_preview": (r["result_text"] or "")[:300]}
-             for r in conn.execute("SELECT h.*, o.delivery_state FROM handoffs h LEFT JOIN outbox o USING(handoff_id)"
-                                   " WHERE h.state='ready' ORDER BY h.created_at LIMIT 100")]
+              "result_chars": len(r["result_text"] or ""),
+              "result_preview": None if r["source_type"] == "gateway_codex" else (r["result_text"] or "")[:300],
+              "gateway_provenance": _gateway_provenance(r)}
+             for r in conn.execute("""SELECT h.*, o.delivery_state, g.job_id AS gateway_job_id, g.thread_id, g.final_item_id,
+                                   g.process_status, g.exit_code, g.turn_status, g.execution_status, g.result_state,
+                                   g.result_digest AS gateway_result_digest, g.log_digest AS gateway_log_digest, g.log_bytes, g.stdout_ref,g.app_server_evidence_json,
+                                   g.observed_at AS gateway_observed_at, g.error_code AS gateway_error_code
+                                   FROM handoffs h LEFT JOIN outbox o USING(handoff_id) LEFT JOIN gateway_jobs g USING(handoff_id)
+                                   WHERE h.state='ready' ORDER BY h.created_at LIMIT 100""")]
     delivery = {state: conn.execute("SELECT COUNT(*) FROM outbox WHERE delivery_state=?", (state,)).fetchone()[0]
                 for state in ("pending", "received", "superseded")}
+    gateway_rows = conn.execute("""SELECT job_id,thread_id,final_item_id,process_status,exit_code,turn_status,execution_status,
+                                result_state,result_digest,log_digest,log_bytes,stdout_ref,observed_at,error_code,handoff_id,app_server_evidence_json
+                                FROM gateway_jobs ORDER BY observed_at DESC LIMIT 100""").fetchall()
+    gateway_counts = {state: conn.execute("SELECT COUNT(*) FROM gateway_jobs WHERE result_state=?", (state,)).fetchone()[0]
+                      for state in ("pending", "succeeded", "failed", "conflict")}
+    gateway_view = {**(snap.get("gateway_codex", {}) if snap else {}), "source_type": "gateway_codex", "provider": "codex-cli",
+                    "result_counts": gateway_counts,
+                    "jobs": [{"job_id": r["job_id"], "thread_id": r["thread_id"], "final_item_id": r["final_item_id"],
+                              "process_status": r["process_status"], "exit_code": r["exit_code"], "turn_status": r["turn_status"],
+                              "execution_status": r["execution_status"], "result_state": r["result_state"],
+                              "result_digest": r["result_digest"], "log_digest": r["log_digest"], "log_bytes": r["log_bytes"],
+                              "stdout_ref": r["stdout_ref"], "observed_at": iso(r["observed_at"]),
+                              "error_code": r["error_code"], "handoff_id": r["handoff_id"],
+                              **({"app_server": _decode_appserver_evidence(r["app_server_evidence_json"])}
+                                 if _decode_appserver_evidence(r["app_server_evidence_json"]) is not None else {})} for r in gateway_rows]}
     unacked = [{"inbox_id": r["id"], "session_id": r["session_id"], "kind": r["kind"], "event_type": r["event_type"],
                 "summary": (r["summary"] or "")[:300], "received_at": iso(r["received_at"])}
                for r in conn.execute("SELECT * FROM inbox WHERE acked_at IS NULL AND kind IN ('terminal','result') ORDER BY id LIMIT 100")]
@@ -1641,6 +2620,7 @@ def build_status(conn: sqlite3.Connection, now: float, *, interval: float = POLL
         "snapshot_age_seconds": None if snapshot_age is None else round(snapshot_age, 1), "snapshot_fresh": snapshot_fresh,
         "poll_cycle": cycle, "observer_only": True, "poll_interval_seconds": interval,
         "providers": providers, "tasks_by_state": snap.get("tasks", {}) if snap else {}, "jobs": snap.get("jobs", {}) if snap else {},
+        "gateway_codex": gateway_view,
         "source_completeness": sources, "minClaude": min_claude, "aux": aux, "root_heartbeat": root_view,
         "delivery": delivery, "ready_handoffs": ready, "unacked_terminal_or_result": unacked,
         "queued_followups": followups, "alerts": alerts,
@@ -1757,8 +2737,14 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "receive":
                 emit(record_receipt(conn, args.items, root_source_id=args.root_source_id, root_epoch=args.root_epoch, note=args.note))
             elif args.command == "show":
-                row = conn.execute("SELECT h.*, o.delivery_state, o.received_at, o.root_source_id, o.root_epoch FROM handoffs h"
-                                   " LEFT JOIN outbox o USING(handoff_id) WHERE h.handoff_id=?", (args.handoff_id,)).fetchone()
+                row = conn.execute("""SELECT h.*, o.delivery_state, o.received_at, o.root_source_id, o.root_epoch,
+                                      g.job_id AS gateway_job_id, g.thread_id, g.final_item_id, g.process_status, g.exit_code,
+                                      g.turn_status, g.execution_status, g.result_state, g.result_digest AS gateway_result_digest,
+                                      g.log_digest AS gateway_log_digest,
+                                      g.log_bytes, g.stdout_ref,g.app_server_evidence_json, g.observed_at AS gateway_observed_at, g.error_code AS gateway_error_code
+                                      FROM handoffs h LEFT JOIN outbox o USING(handoff_id)
+                                      LEFT JOIN gateway_jobs g USING(handoff_id) WHERE h.handoff_id=?""",
+                                      (args.handoff_id,)).fetchone()
                 if row is None:
                     raise SupervisorError("not_found")
                 text = row["result_text"]
@@ -1767,6 +2753,7 @@ def main(argv: list[str] | None = None) -> int:
                       "result_digest": row["result_digest"], "result_chars": len(text or ""),
                       "digest_verified": _digest(text or "") == row["result_digest"], "delivery_state": row["delivery_state"],
                       "received_at": iso(row["received_at"]), "root_source_id": row["root_source_id"], "root_epoch": row["root_epoch"],
+                      "gateway_provenance": _gateway_provenance(row),
                       "result_text": text})
             elif args.command == "ack":
                 emit(acknowledge(conn, args.items, args.note))

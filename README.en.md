@@ -188,6 +188,10 @@ HOME_MCP_AOITALK_ENABLED=1
 
 AoiTalk itself must already be installed and configured locally, including its endpoint, authentication, and required features. This gateway does not install or configure AoiTalk. The default configuration exposes **76 tools**; enabling AoiTalk exposes **97 tools**. Never send AoiTalk credentials to ChatGPT.
 
+The dedicated AoiTalk MCP connection exposes a separate **35-tool** catalog. During Phase A, the existing 21 tools remain on the generic gateway while the new connection is verified. Configure a separately provisioned Tunnel ID in `HOME_MCP_AOITALK_TUNNEL_ID`; optionally set a dedicated Restricted runtime key in `HOME_MCP_AOITALK_RUNTIME_API_KEY`. After the separate tunnel preflight, use `scripts\connect_tunnel.ps1 -Target aoitalk`. Its alias/profile is `aoitalk`, status and logs live under `.runtime\aoitalk\`, and its profile is `.runtime\profiles\aoitalk.yaml`. To register its separate autostart task, use `scripts\install_autostart.ps1 -Target aoitalk`; the default task name is `Home MCP Gateway - AoiTalk`. These commands do not create a Tunnel or add/refresh a plugin in the GUI.
+
+See [the dedicated AoiTalk MCP guide](docs/aoitalk-plugin.md) for its tools, operation-ID recovery and Docs/Knowledge paging contracts.
+
 ## Tool groups
 
 The default configuration exposes 76 tools. The main groups are:
@@ -201,6 +205,7 @@ The default configuration exposes 76 tools. The main groups are:
 | Development workflows | Git repositories / worktrees, persistent jobs, and browser sessions (Playwright) |
 | Images and diagnostics | Image context plus local tool-timing diagnostics |
 | AoiTalk (optional) | Clip ingestion, local/API Agent task delegation and final-answer retrieval, and CLI continuation sessions; adds 21 tools |
+| Dedicated AoiTalk plugin | Separate 35-tool task/Docs/Knowledge management catalog and runtime |
 
 These groups do not create an allowlist or a read-only boundary. Limit connections and prompts to people and workflows you trust.
 
