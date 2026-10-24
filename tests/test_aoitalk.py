@@ -418,7 +418,7 @@ def fixture_server(api):
 class StdioClipTests(unittest.TestCase):
     def test_new_tools_over_real_stdio_and_local_http(self):
         async def check(url, env_path, cwd):
-            launcher = Path(__file__).resolve().parents[1] / "scripts/gateway_stdio.py"
+            launcher = Path(__file__).resolve().parents[1] / "scripts/aoitalk_plugin_stdio.py"
             params = StdioServerParameters(command=sys.executable, args=[str(launcher)], cwd=cwd,
                 env={"HOME_MCP_AOITALK_ENV_FILE": env_path, "HOME_MCP_AOITALK_URL": url,
                      "HOME_MCP_AOITALK_TARGET_NODE_ID": "", "HOME_MCP_AOITALK_ENABLED": "true"})

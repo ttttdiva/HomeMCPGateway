@@ -184,15 +184,9 @@ Stop-ScheduledTask -TaskName 'Home MCP Gateway'
 
 ## AoiTalk（任意）
 
-AoiTalk 連携は初期状態では無効です。有効にする場合は、ローカルの `.env` に次を追加し、runtime を再起動して ChatGPT の接続を更新または Refresh します。
+AoiTalk tools は AoiTalk 専用 MCP 接続だけで公開されます。Phase B 以降、汎用 Gateway は常に **78 tools** を公開し、旧 `aoitalk_*` tools を登録しません。`HOME_MCP_AOITALK_ENABLED` はcatalogに影響しない無効な旧flagです。撤去した tool 名と offline catalog 契約は [Phase B の catalog 変更](docs/aoitalk-plugin.md) に記録しています。専用接続は **35 tools**（Clip 3、local task 5、API Agent 5、CLI session 8、管理14）を公開します。認証情報を ChatGPT に渡さないでください。
 
-```dotenv
-HOME_MCP_AOITALK_ENABLED=1
-```
-
-AoiTalk 自体が PC にインストール済みで、接続先・認証・必要な機能が設定済みである必要があります。この Gateway は AoiTalk をインストールまたは設定しません。AoiTalk が無効なら **76 tools**、有効なら **97 tools** が公開されます。認証情報を ChatGPT に渡さないでください。
-
-専用の AoiTalk MCP 接続は汎用Gatewayとは別の **35 tools** を公開します。Phase Aでは旧Gateway側の21 toolsもソースと公開面に残して移行確認を行います。専用接続には、別途用意したTunnel IDを `.env` の `HOME_MCP_AOITALK_TUNNEL_ID` に設定し、必要なら `HOME_MCP_AOITALK_RUNTIME_API_KEY` に専用Restricted runtime keyを設定します。専用Tunnelの運用preflight後に `scripts\connect_tunnel.ps1 -Target aoitalk` を使います。既定alias/profileは `aoitalk`、状態とログは `.runtime\aoitalk\`、profileファイルは `.runtime\profiles\aoitalk.yaml` です。自動起動を登録する場合は `scripts\install_autostart.ps1 -Target aoitalk` を使い、既定TaskName `Home MCP Gateway - AoiTalk` を利用します。どちらのコマンドもTunnelを新規発行せず、GUIでのPlugin追加・Refreshは行いません。
+AoiTalk 自体と接続先・認証・必要な機能は別途設定が必要です。この Gateway は AoiTalk をインストールまたは設定しません。専用接続には、別途用意したTunnel IDを `.env` の `HOME_MCP_AOITALK_TUNNEL_ID` に設定し、必要なら `HOME_MCP_AOITALK_RUNTIME_API_KEY` に専用Restricted runtime keyを設定します。専用Tunnelの運用preflight後に `scripts\connect_tunnel.ps1 -Target aoitalk` を使います。既定alias/profileは `aoitalk`、状態とログは `.runtime\aoitalk\`、profileファイルは `.runtime\profiles\aoitalk.yaml` です。自動起動を登録する場合は `scripts\install_autostart.ps1 -Target aoitalk` を使い、既定TaskName `Home MCP Gateway - AoiTalk` を利用します。どちらのコマンドもTunnelを新規発行せず、GUIでのPlugin追加・Refreshは行いません。
 
 専用MCPのtool構成、operation IDによる安全な再照合、Docs/Knowledgeのページング契約は [AoiTalk専用MCP](docs/aoitalk-plugin.md) を参照してください。
 
@@ -201,7 +195,7 @@ AoiTalk 自体が PC にインストール済みで、接続先・認証・必�
 
 ## ツールの概要
 
-標準構成は 76 ツールです。主なグループは次のとおりです。
+汎用 Gateway は常に 78 ツールです。主なグループは次のとおりです。
 
 | グループ | 主な内容 |
 | --- | --- |
@@ -211,8 +205,8 @@ AoiTalk 自体が PC にインストール済みで、接続先・認証・必�
 | デスクトップ・端末 | Windows の観測・UI 操作、スクリーンショット（MCPネイティブPNG）、座標系 `screen`/`window`/`normalized` による視覚付き Computer Use（[詳細](docs/computer-use.ja.md)）、Android / ADB |
 | 開発ワークフロー | Git リポジトリ / worktree、長時間ジョブ、ブラウザ（Playwright） |
 | 画像・診断 | 画像コンテキスト、ツール実行のローカル診断ログ |
-| AoiTalk（任意） | クリップ取り込み、ローカル／API Agentタスク委譲・最終回答取得、CLI継続セッション。21 ツールを追加 |
-| AoiTalk専用Plugin | Task/Docs/Knowledge管理を含む専用35 tools。汎用Gatewayとは別Tunnel/runtime |
+
+別接続の AoiTalk 専用MCPは35 tools（Clip 3、local task 5、API Agent 5、CLI session 8、管理14）を公開します。このcatalogは汎用Gatewayの78 toolsには含まれません。
 
 これらのグループにもアクセス制限や read-only 境界が追加されるわけではありません。接続相手とプロンプトを信頼できる範囲に限定してください。
 
@@ -222,7 +216,8 @@ AoiTalk 自体が PC にインストール済みで、接続先・認証・必�
 - `tunnel-client.exe` が見つからない場合: runtime-only ではない完全な Windows ZIP を展開し、`tunnel-client.exe` を PATH に置くか `TUNNEL_CLIENT_PATH` を設定します。
 - runtime が `ready` にならない場合: Tunnel ID、Restricted runtime API key の Tunnels Read / Use、Tunnel と ChatGPT ワークスペースの関連付け、ローカルの runtime 状態を確認します。
 - ChatGPT にツールが表示されない場合: Developer mode、アプリの **Tunnel**、正しい Tunnel ID、**No authentication**、runtime の `ready` を確認してから、Gateway を再起動し [Refresh MCP metadata](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata) を実行します。
-- AoiTalk のツールが表示されない場合: `.env` に `HOME_MCP_AOITALK_ENABLED=1` を設定して runtime を再起動し、AoiTalk 自体のインストール・設定・接続状態を確認してから refresh します。
+- AoiTalk tools が表示されない場合: ChatGPT の AoiTalk 専用 MCP 接続が有効か確認します。旧flag `HOME_MCP_AOITALK_ENABLED` はcatalogに影響しません。
+- Home MCP Gateway に旧 `aoitalk_*` 名が残って `Unknown tool` になる場合: 接続設定で「ツールを更新」(Refresh) します。runtime の再起動は不要です。Refresh で解消しない場合だけ接続を削除して再追加します。
 - 認証情報を誤って貼り付けた場合: runtime API key を直ちにローテーションし、ChatGPT の会話・アプリ設定・共有ログから削除します。ChatGPT は runtime API key を必要としません。
 
 受信用ポートを開ける方式ではないため、Tunnel が接続できないときに Windows の受信ファイアウォール規則を追加する必要はありません。

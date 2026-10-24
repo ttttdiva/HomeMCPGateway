@@ -180,21 +180,15 @@ Stop-ScheduledTask -TaskName 'Home MCP Gateway'
 
 ## AoiTalk（可选）
 
-AoiTalk 集成默认关闭。要启用它，请在本地 `.env` 中添加以下内容，重启 runtime，然后刷新 ChatGPT 连接：
+AoiTalk 工具仅通过 AoiTalk 专用 MCP 连接提供。Phase B 之后，通用 Gateway 始终公开 **78 个工具**，不再注册旧的 `aoitalk_*` 工具；`HOME_MCP_AOITALK_ENABLED` 是无效的旧 flag，不影响其 catalog。撤除的工具名称与 offline catalog 契约记录在 [Phase B catalog 变更](docs/aoitalk-plugin.md) 中。专用连接提供 **35 个工具**（Clip 3、local task 5、API Agent 5、CLI session 8、管理工具14）。不要将 AoiTalk 凭据发送给 ChatGPT。
 
-```dotenv
-HOME_MCP_AOITALK_ENABLED=1
-```
-
-AoiTalk 本身必须已经安装并在本机配置好，包括端点、认证和所需功能。本 Gateway 不会安装或配置 AoiTalk。默认配置公开 **76 个工具**；启用 AoiTalk 后公开 **97 个工具**。不要将 AoiTalk 凭据发送给 ChatGPT。
-
-专用 AoiTalk MCP 连接会公开独立的 **35 个工具**。Phase A 验证期间，通用 Gateway 仍保留现有 21 个工具。将单独配置的 Tunnel ID 写入 `HOME_MCP_AOITALK_TUNNEL_ID`；如需独立 Restricted runtime key，可设置 `HOME_MCP_AOITALK_RUNTIME_API_KEY`。完成单独的隧道 preflight 后，使用 `scripts\connect_tunnel.ps1 -Target aoitalk`。它使用独立 alias/profile `aoitalk`，状态和日志位于 `.runtime\aoitalk\`，profile 文件位于 `.runtime\profiles\aoitalk.yaml`。如需注册独立的自动启动任务，使用 `scripts\install_autostart.ps1 -Target aoitalk`；默认任务名为 `Home MCP Gateway - AoiTalk`。这些命令不会创建 Tunnel，也不会在 GUI 中添加或刷新 Plugin。
+AoiTalk 本身及其端点、认证和所需功能必须另行配置。本 Gateway 不会安装或配置 AoiTalk。将单独配置的 Tunnel ID 写入 `HOME_MCP_AOITALK_TUNNEL_ID`；如需独立 Restricted runtime key，可设置 `HOME_MCP_AOITALK_RUNTIME_API_KEY`。完成单独的隧道 preflight 后，使用 `scripts\connect_tunnel.ps1 -Target aoitalk`。它使用独立 alias/profile `aoitalk`，状态和日志位于 `.runtime\aoitalk\`，profile 文件位于 `.runtime\profiles\aoitalk.yaml`。如需注册独立的自动启动任务，使用 `scripts\install_autostart.ps1 -Target aoitalk`；默认任务名为 `Home MCP Gateway - AoiTalk`。这些命令不会创建 Tunnel，也不会在 GUI 中添加或刷新 Plugin。
 
 工具、operation ID 状态恢复以及 Docs/Knowledge 分页契约见[专用 AoiTalk MCP 指南](docs/aoitalk-plugin.md)。
 
 ## 工具分组
 
-默认配置公开 76 个工具，主要分组如下：
+通用 Gateway 始终公开 78 个工具，主要分组如下：
 
 | 分组 | 示例 |
 | --- | --- |
@@ -204,8 +198,8 @@ AoiTalk 本身必须已经安装并在本机配置好，包括端点、认证和
 | 桌面与设备 | Windows 观测/UI 操作、截图以及 Android / ADB |
 | 开发工作流 | Git 仓库 / worktree、持久化任务以及浏览器会话（Playwright） |
 | 图像与诊断 | 图像上下文和本地工具计时诊断 |
-| AoiTalk（可选） | 剪辑导入、本地/API Agent 任务委派与最终回答获取，以及 CLI 持续会话；增加 21 个工具 |
-| 专用 AoiTalk Plugin | 独立的35个 Task/Docs/Knowledge管理工具及runtime |
+
+单独的 AoiTalk 专用 MCP 连接提供35个工具（Clip 3、local task 5、API Agent 5、CLI session 8、管理工具14）。这些工具不计入通用 Gateway 的78个工具。
 
 这些分组不会额外建立 allowlist 或 read-only 边界。请只将连接和提示交给可信的人和工作流。
 
@@ -215,7 +209,8 @@ AoiTalk 本身必须已经安装并在本机配置好，包括端点、认证和
 - 找不到 `tunnel-client.exe`：解压完整 Windows ZIP（不是 runtime-only 包），将可执行文件放入 PATH，或设置 `TUNNEL_CLIENT_PATH`。
 - runtime 没有变成 `ready`：检查 Tunnel ID、Restricted runtime key 的 Tunnels Read / Use 权限、Tunnel 与工作区的关联，以及本地 runtime 状态。
 - ChatGPT 没有显示工具：确认 Developer mode、**Tunnel**、正确的 Tunnel ID、**No authentication** 和本地 `ready` 状态；重启 Gateway 后使用 [Refresh MCP metadata](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata)。
-- 没有 AoiTalk 工具：设置 `HOME_MCP_AOITALK_ENABLED=1`，重启 runtime，确认 AoiTalk 已安装并配置，然后刷新连接。
+- 没有 AoiTalk 工具：确认 AoiTalk 专用 MCP 连接已启用。旧 flag `HOME_MCP_AOITALK_ENABLED` 不影响 catalog。
+- Home MCP Gateway 中仍有旧 `aoitalk_*` 名称并返回 `Unknown tool`：在该连接设置中选择“刷新工具”(Refresh)。无需重启 runtime；仅当 Refresh 无法解决时才删除并重新添加连接。
 - 曾把凭据粘贴到 ChatGPT：立即轮换 runtime API key，并从对话、应用设置和共享日志中删除。ChatGPT 不需要这个 key。
 
 这是出站 Tunnel，因此排查时不需要添加 Windows 入站防火墙规则。

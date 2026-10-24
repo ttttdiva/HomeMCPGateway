@@ -11,7 +11,7 @@ dependencies = [
   "mcp>=2.2,<3",
   "psutil>=7,<8",
   "Pillow>=11.2.1,<13",
-  "playwright>=1.51,<2",
+  "playwright>=1.64.1,<2",
   "httpx>=0.28,<1",
   "python-dotenv>=1.0,<2",
   "pywin32>=311; sys_platform == 'win32'",

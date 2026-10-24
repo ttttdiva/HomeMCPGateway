@@ -1113,7 +1113,7 @@ class AgentTaskTests(unittest.IsolatedAsyncioTestCase):
                                 f"AOITALK_BOOTSTRAP_ADMIN_PASSWORD='{PASSWORD}'\n", encoding="utf-8")
             params = StdioServerParameters(
                 command=sys.executable,
-                args=[str(Path(__file__).resolve().parents[1] / "scripts" / "gateway_stdio.py")],
+                args=[str(Path(__file__).resolve().parents[1] / "scripts" / "aoitalk_plugin_stdio.py")],
                 cwd=cwd, env={"HOME_MCP_AOITALK_ENABLED": "true", "HOME_MCP_AOITALK_URL": url,
                               "HOME_MCP_AOITALK_ENV_FILE": str(env_file), "HOME_MCP_TOOL_LOG": "0"},
             )

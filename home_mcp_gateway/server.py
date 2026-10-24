@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from typing import Any
 from contextlib import asynccontextmanager
 
@@ -12,46 +11,19 @@ if os.environ.get("HOME_MCP_PROFILE"):
 
 from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
-from dotenv import dotenv_values
 
-from . import core, aoitalk, aoitalk_auth, aoitalk_agent_tasks, aoitalk_cli_sessions, aoitalk_tasks, image_library, local_plan
-from .aoitalk_task_schema import structured_task_tool
-from .aoitalk_agent_task_schema import structured_agent_task_tool
-from .aoitalk_cli_session_schema import structured_cli_session_tool
+from . import core, image_library, local_plan
 from . import android, browser_qa, desktop, git_qa, jobs, readiness, telemetry
 from .qa_common import register_tools
 from .telemetry import instrument_tool, tracked_tool
 
-GATEWAY_ROOT = Path(__file__).resolve().parents[1]
-_AOITALK_ENABLED_VALUES = frozenset({"1", "true", "yes", "on"})
-
-
-def _aoitalk_enabled() -> bool:
-    """Resolve the local opt-in without globally loading any dotenv file."""
-    name = "HOME_MCP_AOITALK_ENABLED"
-    if name in os.environ:
-        value = os.environ[name]
-    else:
-        try:
-            values = dotenv_values(GATEWAY_ROOT / ".env", encoding="utf-8-sig", interpolate=False)
-        except Exception:
-            # A missing/unreadable/malformed local .env must never enable the
-            # integration accidentally.
-            return False
-        value = values.get(name)
-    return isinstance(value, str) and value.strip().casefold() in _AOITALK_ENABLED_VALUES
-
 
 @asynccontextmanager
 async def lifespan(server):
-    await aoitalk_auth.activate()
     try:
         yield {}
     finally:
-        try:
-            await aoitalk_auth.deactivate()
-        finally:
-            await browser_qa.close_all()
+        await browser_qa.close_all()
 
 
 mcp = MCPServer(
@@ -270,51 +242,6 @@ def tool_log_summary(window_minutes: int = 60, top_n: int = 20) -> dict[str, Any
 for module in (git_qa, jobs, android, readiness, browser_qa):
     register_tools(mcp, module.TOOLS)
 
-
-# Dedicated ClipIngest tools have explicit write/read annotations. Their adapter
-# returns bounded errors and never exposes local login credentials to MCP.
-if _aoitalk_enabled():
-    for function in aoitalk.TOOLS:
-        writes_docs = function is aoitalk.aoitalk_clip_ingest
-        mcp.tool(annotations=ToolAnnotations(
-            read_only_hint=not writes_docs,
-            destructive_hint=writes_docs,
-            idempotent_hint=True,
-            open_world_hint=True,
-        ))(instrument_tool(function))
-
-    # AoiTalk local-agent delegation: start returns a task_id immediately and the
-    # other tools only read/cancel, so no MCP request waits on the long work.
-    for function in aoitalk_tasks.TOOLS:
-        read_only = function in aoitalk_tasks.READ_ONLY_TOOLS
-        mcp.tool(annotations=ToolAnnotations(
-            read_only_hint=read_only,
-            destructive_hint=function is aoitalk_tasks.aoitalk_local_task_start,
-            idempotent_hint=True,
-            open_world_hint=not read_only,
-        ))(structured_task_tool(instrument_tool(function)))
-
-    # Generic API-Agent tasks are only forwarded over the authenticated HTTP
-    # client. AoiTalk owns their runtime and provider selection.
-    for function in aoitalk_agent_tasks.TOOLS:
-        read_only = function in aoitalk_agent_tasks.READ_ONLY_TOOLS
-        mcp.tool(annotations=ToolAnnotations(
-            read_only_hint=read_only,
-            destructive_hint=not read_only,
-            idempotent_hint=True,
-            open_world_hint=not read_only,
-        ))(structured_agent_task_tool(instrument_tool(function)))
-
-    # CLI continuation sessions are owned by AoiTalk.  The Gateway only
-    # forwards bounded requests/results and never starts a provider process.
-    for function in aoitalk_cli_sessions.TOOLS:
-        read_only = function in aoitalk_cli_sessions.READ_ONLY_TOOLS
-        mcp.tool(annotations=ToolAnnotations(
-            read_only_hint=read_only,
-            destructive_hint=not read_only,
-            idempotent_hint=True,
-            open_world_hint=not read_only,
-        ))(structured_cli_session_tool(instrument_tool(function)))
 
 for function in image_library.TOOLS:
     mcp.tool(annotations=ToolAnnotations(

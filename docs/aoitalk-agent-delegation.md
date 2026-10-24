@@ -1,5 +1,7 @@
 # AoiTalk の Agent へローカル委譲する
 
+> **現行構成（Phase B）:** 汎用 Gateway は常に78 toolsを公開し、AoiTalk tools 35個はAoiTalk専用 MCP 接続だけで公開します。`HOME_MCP_AOITALK_ENABLED` は無効な旧flagで、catalogに影響しません。
+
 この経路は ChatGPT のモデル差し替えではありません。Gateway は目的と権限を
 AoiTalk の既存タスク API に渡し、AoiTalk が自身の Agent / AgentRevision / AgentRun /
 work と共有ローカル runtime を使って実行します。Gateway に別の LLM loop、
@@ -8,7 +10,7 @@ work と共有ローカル runtime を使って実行します。Gateway に別�
 ## 構成と依存関係
 
 ```text
-ChatGPT → Gateway（MCP / Tunnel）→ AoiTalk API → Agent / AgentRun / work → 実行 runtime
+ChatGPT → AoiTalk専用 MCP → AoiTalk API → Agent / AgentRun / work → 実行 runtime
 AoiTalk → Gateway（ローカル stdio、read-only の 4 tool）
 ```
 
@@ -23,12 +25,13 @@ AoiTalk → Gateway（ローカル stdio、read-only の 4 tool）
 - Gateway 自体の汎用コマンド実行ツール（Codex などの CLI を直接起動できる経路）は
   AoiTalk に依存しません。AoiTalk が無くても動作し、AoiTalk の Agent 権限や
   task 契約は適用されません。両者を混同しないでください。
-- AoiTalk を無効（`HOME_MCP_AOITALK_ENABLED` 未設定または `0`）にしても、
-  通常の Gateway ツールは引き続き使えます。
+- AoiTalk専用 MCP 接続のON/OFFを切り替えても、汎用 Gateway の78 toolsは変わりません。
+  旧 `HOME_MCP_AOITALK_ENABLED` の値も汎用 catalog に影響しません。
 
-## ChatGPT → Gateway → AoiTalk
+## ChatGPT → AoiTalk専用 MCP → AoiTalk
 
-Gateway の `.env` で `HOME_MCP_AOITALK_ENABLED=1` を opt-in し、既存の認証設定を使います。
+AoiTalk へのChatGPT連携ではAoiTalk専用 MCP 接続を有効にし、既存の認証済み AoiTalk APIを使います。
+AoiTalk用の5 local task toolsは専用接続から呼び出します。汎用 Gatewayは常に78 toolsで、AoiTalk toolsを公開しません。
 秘密値は MCP 引数・モデル context に渡しません。
 
 `aoitalk_local_task_start` は任意の `agent_id`, `provider`, `model`, `effort` を受け付けます。
@@ -129,13 +132,14 @@ adapter が渡します。モデルが workspace / owner / AgentRun scope を指
   - `HOME_MCP_WORKSPACE=<認可された絶対workspace>`
   - `HOME_MCP_AGENT_RUN_ID=<AgentRun ID>`
   - `HOME_MCP_OWNER_ID=<認証から得た owner ID>`
-  - `HOME_MCP_AOITALK_ENABLED=0`
 
 scope の検証と Agent の有効性・権限の確認は、AoiTalk が各 tools/call の直前に行います。
 1 child は 1 run のみに属し、取消・権限剥奪・終了時は AoiTalk の既存 lifecycle でその child だけを閉じます。
 環境変数の ID は照合・監査情報であり、認証資格情報ではありません。
 子環境へ渡すのは OS / Python の必須値と scope の allowlist のみで、Gateway の launcher も
-同じ allowlist を再適用し、不要な credential を保持しません。通常 Gateway の環境は変更しません。
+同じ allowlist を再適用し、不要な credential を保持しません。
+子環境には `home_mcp_gateway/local_agent_profile.py` が `HOME_MCP_AOITALK_ENABLED=0` を常に強制設定します。
+これは旧 AoiTalk tools の登録を意味せず、汎用 catalog も変更しません。通常 Gateway の環境は変更しません。
 
 この profile が公開するツールは次の固定 4 個だけです。
 
@@ -167,17 +171,23 @@ job / browser / desktop、画像、外部 HTTP、AoiTalk 再委譲、clip ingest
 initialize → tools/list → 無害な read_text → 禁止 tools/call の拒否 → 切断を確認します。
 AoiTalk と Gateway は別の venv・別の MCP SDK バージョンで動かすことがあるため、
 単一 venv のテストを cross-version 検証と呼ばないでください。
-通常 Gateway の既存テストも実行し、連携 OFF や AoiTalk 停止でも通常ツールが使えることを確認します。
+通常 Gateway の既存テストも実行し、Phase B で汎用 Gateway から AoiTalk tools を撤去した後の78 toolsが、
+旧flagの値・AoiTalk接続の有無・AoiTalk停止のいずれでも同一であることを確認します。
 
 ## 反映と OFF への戻し方
 
-コードと非 GPU テストの完了は、稼働設定の変更・再起動・MCP metadata 更新・実モデルでの受入とは別です。
+コードと非 GPU テストの完了は、稼働設定の変更・MCP metadata 更新・実モデルでの受入とは別です。
 他の作業が動いている間は、稼働中の AoiTalk / Tunnel / ローカルモデル runtime を切り替えないでください。
-安全なタイミングで起動設定を反映し、Gateway を再接続して、ChatGPT の
-[公式の MCP metadata refresh 手順](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata)
-で追加 schema を再取得し、新しい会話で対象 tool を再評価します。
+
+AoiTalk toolsをONにする場合は、ChatGPTのAoiTalk専用 MCP 接続を有効にし、対象接続の「ツールを更新」(Refresh)を実行します。
+汎用 Gateway に残る旧 `aoitalk_*` 名が `Unknown tool` になる場合も、その接続でRefreshします。
+この catalog 移行では、接続済み catalog が古いこと自体はRefreshで足り、runtimeプロセスの再起動は要りません。
+変更したruntimeのコードや設定を稼働へ反映するために再起動が必要な場合は、その通常のruntime再起動を別途行います。
+Refreshで解消しない場合は、接続を削除して再追加します。
+[公式の MCP metadata refresh 手順](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata)も参照してください。
+専用接続のON/OFFを切り替えても汎用 Gateway の78 toolsは変わりません。
 稼働確認では requested / resolved route と実 worker identity を照合します。
 
-OFF へ戻す場合は、AoiTalk 側の対象 scoped 接続を解除し、その所有 child を閉じます。
-ChatGPT 側の委譲機能も止める場合にだけ、Gateway の `HOME_MCP_AOITALK_ENABLED=0` を設定し、
-安全なタイミングで再接続と metadata 更新を行います。Agent 全体の route や共有モデルは変更しません。
+OFFへ戻す場合は、ChatGPTでAoiTalk専用 MCP 接続を無効にします。
+AoiTalk側の対象scoped接続を止める場合は、その所有childを閉じます。
+Agent全体のrouteや共有モデルは変更しません。

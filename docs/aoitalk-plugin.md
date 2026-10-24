@@ -2,9 +2,28 @@
 
 ## 移行段階
 
-Phase Aでは、専用MCPを既存のAoiTalk client、認証所有者、schema wrapperと共有し、35 toolsをstdioで公開します。内訳は既存Clip 3、local task 5、API Agent 5、CLI session 8、新しいTask/Docs/Knowledge管理14です。既存の汎用GatewayはPhase A中も21個の `aoitalk_*` toolsを公開します。Phase Bはrootから専用PluginのGUI導入と実read成功が通知された後にだけ行い、汎用serverの登録とimportを除去します。
+専用MCPは既存のAoiTalk client、認証所有者、schema wrapperを共有し、35 toolsをstdioで公開します。内訳は既存Clip 3、local task 5、API Agent 5、CLI session 8、Task/Docs/Knowledge管理14です。AoiTalk側の独立公開の正本は `41/plugins/AoiTalk_Plugin` です。
 
-専用entry `scripts/aoitalk_plugin_stdio.py` は `home_mcp_gateway.server` をimportせず、generic GatewayのOS tool、job、telemetry catalogを登録しません。`HOME_MCP_PROFILE` が設定されている場合は起動を拒否します。control-plane/admin keyと専用runtime keyはMCP childへ渡しません。
+この80リポジトリにもstdio entry script `scripts/aoitalk_plugin_stdio.py` と、35 toolsを登録する実装 `home_mcp_gateway/aoitalk_plugin_server.py` があります。entry scriptはこのserver moduleを起動します。現在のlive接続が41側Pluginと80側entryのどちらから配信されているかは未確認で、別作業です。
+
+Phase BのSOURCE変更では、汎用Gatewayから旧21個の `aoitalk_*` 登録と、それだけに使うimport・認証lifespan・設定gateを撤去しました。`HOME_MCP_AOITALK_ENABLED` は汎用catalogを変更しません。汎用78 tools（Codex用job tools 8個を含む）、共有client/schema/library、専用serverは維持します。この変更は稼働中Gateway、AoiTalk、Tunnel、認証設定を変更せず、live catalogへの反映は別作業です。
+
+変更前HEAD `9350ec4` の実catalogから撤去exact names、汎用集合、専用schema/annotations契約を `tests/fixtures/phase_b_catalog_contract.json` に保存しています。offline検証では旧flagの有無に関係なく汎用catalogが同一で、AoiTalk module importを拒否してもgeneric importと正常・例外両方のlifespan終了が成功することを確認します。
+
+専用entry `scripts/aoitalk_plugin_stdio.py` は `home_mcp_gateway.aoitalk_plugin_server` を起動し、`home_mcp_gateway.server` をimportせず、generic GatewayのOS tool、job、telemetry catalogを登録しません。`HOME_MCP_PROFILE` が設定されている場合は起動を拒否します。control-plane/admin keyと専用runtime keyはMCP childへ渡しません。
+
+## SOURCE撤去境界
+
+撤去したexact namesは上記fixtureの `removed_generic_names` に列挙しています。変更前の実登録元は次の4経路です。
+
+| 登録元 | tools数 | genericから外したschema wrapper依存 |
+| --- | ---: | --- |
+| `aoitalk.TOOLS` | 3 | なし |
+| `aoitalk_tasks.TOOLS` | 5 | `aoitalk_task_schema.structured_task_tool` |
+| `aoitalk_agent_tasks.TOOLS` | 5 | `aoitalk_agent_task_schema.structured_agent_task_tool` |
+| `aoitalk_cli_sessions.TOOLS` | 8 | `aoitalk_cli_session_schema.structured_cli_session_tool` |
+
+genericの `server -> _aoitalk_enabled -> dotenv_values(.env)` と `lifespan -> aoitalk_auth.activate/deactivate` も撤去しました。専用serverの認証lifespanと上記client/schema modulesは保持しています。Codexの `jobs -> work_dispatcher_codex`、dispatcher/supervisor、および実行時validatorから共有AoiTalk libraryを利用する経路も変更していません。
 
 ## Tunnelとlauncher
 

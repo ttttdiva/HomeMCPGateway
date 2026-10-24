@@ -180,21 +180,15 @@ Stop-ScheduledTask -TaskName 'Home MCP Gateway'
 
 ## AoiTalk (optional)
 
-AoiTalk integration is disabled by default. To enable it, add this to the local `.env`, restart the runtime, and refresh the ChatGPT connection:
+AoiTalk tools are exposed only through the dedicated AoiTalk MCP connection. Since Phase B, the generic Gateway always exposes **78 tools** and no longer registers the old `aoitalk_*` tools; `HOME_MCP_AOITALK_ENABLED` is an inactive legacy flag and does not affect its catalog. [The Phase B catalog change](docs/aoitalk-plugin.md) records the removed tool names and the offline catalog contract. The dedicated connection exposes **35 tools** (3 Clip, 5 local task, 5 API Agent, 8 CLI session, and 14 management tools). Never send AoiTalk credentials to ChatGPT.
 
-```dotenv
-HOME_MCP_AOITALK_ENABLED=1
-```
-
-AoiTalk itself must already be installed and configured locally, including its endpoint, authentication, and required features. This gateway does not install or configure AoiTalk. The default configuration exposes **76 tools**; enabling AoiTalk exposes **97 tools**. Never send AoiTalk credentials to ChatGPT.
-
-The dedicated AoiTalk MCP connection exposes a separate **35-tool** catalog. During Phase A, the existing 21 tools remain on the generic gateway while the new connection is verified. Configure a separately provisioned Tunnel ID in `HOME_MCP_AOITALK_TUNNEL_ID`; optionally set a dedicated Restricted runtime key in `HOME_MCP_AOITALK_RUNTIME_API_KEY`. After the separate tunnel preflight, use `scripts\connect_tunnel.ps1 -Target aoitalk`. Its alias/profile is `aoitalk`, status and logs live under `.runtime\aoitalk\`, and its profile is `.runtime\profiles\aoitalk.yaml`. To register its separate autostart task, use `scripts\install_autostart.ps1 -Target aoitalk`; the default task name is `Home MCP Gateway - AoiTalk`. These commands do not create a Tunnel or add/refresh a plugin in the GUI.
+AoiTalk and its endpoint, authentication, and required features must be configured separately. This gateway does not install or configure AoiTalk. Configure a separately provisioned Tunnel ID in `HOME_MCP_AOITALK_TUNNEL_ID`; optionally set a dedicated Restricted runtime key in `HOME_MCP_AOITALK_RUNTIME_API_KEY`. After the separate tunnel preflight, use `scripts\connect_tunnel.ps1 -Target aoitalk`. Its alias/profile is `aoitalk`, status and logs live under `.runtime\aoitalk\`, and its profile is `.runtime\profiles\aoitalk.yaml`. To register its separate autostart task, use `scripts\install_autostart.ps1 -Target aoitalk`; the default task name is `Home MCP Gateway - AoiTalk`. These commands do not create a Tunnel or add/refresh a plugin in the GUI.
 
 See [the dedicated AoiTalk MCP guide](docs/aoitalk-plugin.md) for its tools, operation-ID recovery and Docs/Knowledge paging contracts.
 
 ## Tool groups
 
-The default configuration exposes 76 tools. The main groups are:
+The generic Gateway always exposes 78 tools. The main groups are:
 
 | Group | Examples |
 | --- | --- |
@@ -204,8 +198,8 @@ The default configuration exposes 76 tools. The main groups are:
 | Desktop and devices | Windows observation/UI actions, screenshots, and Android / ADB |
 | Development workflows | Git repositories / worktrees, persistent jobs, and browser sessions (Playwright) |
 | Images and diagnostics | Image context plus local tool-timing diagnostics |
-| AoiTalk (optional) | Clip ingestion, local/API Agent task delegation and final-answer retrieval, and CLI continuation sessions; adds 21 tools |
-| Dedicated AoiTalk plugin | Separate 35-tool task/Docs/Knowledge management catalog and runtime |
+
+The separate AoiTalk MCP connection exposes 35 tools (3 Clip, 5 local task, 5 API Agent, 8 CLI session, and 14 management tools). They are not included in the generic Gateway's 78-tool catalog.
 
 These groups do not create an allowlist or a read-only boundary. Limit connections and prompts to people and workflows you trust.
 
@@ -215,7 +209,8 @@ These groups do not create an allowlist or a read-only boundary. Limit connectio
 - `tunnel-client.exe` not found: extract the complete Windows ZIP (not the runtime-only package), put the executable on `PATH`, or set `TUNNEL_CLIENT_PATH`.
 - Runtime is not `ready`: check the Tunnel ID, the Restricted runtime key's Tunnels Read / Use permissions, the tunnel-to-workspace association, and the local runtime status.
 - ChatGPT shows no tools: verify Developer mode, **Tunnel**, the correct Tunnel ID, **No authentication**, and local `ready` status; restart the gateway and use [Refresh MCP metadata](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata).
-- AoiTalk tools are missing: set `HOME_MCP_AOITALK_ENABLED=1`, restart the runtime, verify that AoiTalk is installed and configured, then refresh the connection.
+- AoiTalk tools are missing: check that the dedicated AoiTalk MCP connection is enabled. The legacy `HOME_MCP_AOITALK_ENABLED` flag does not affect the catalog.
+- Old `aoitalk_*` names remain under Home MCP Gateway and return `Unknown tool`: open that connection's settings and select **Refresh**. A runtime restart is unnecessary; delete and re-add the connection only if Refresh does not resolve it.
 - A credential was pasted into ChatGPT: rotate the runtime API key immediately and remove it from conversations, app settings, and shared logs. ChatGPT does not need this key.
 
 This is an outbound tunnel, so opening a Windows inbound firewall rule is not a troubleshooting step.

@@ -1248,7 +1248,7 @@ class CliSessionTests(unittest.IsolatedAsyncioTestCase):
 class StdioCliSessionTests(unittest.TestCase):
     def test_tools_are_discoverable_with_structured_schema_over_stdio(self):
         async def check(url: str, env_path: str, cwd: str):
-            launcher = Path(__file__).resolve().parents[1] / "scripts" / "gateway_stdio.py"
+            launcher = Path(__file__).resolve().parents[1] / "scripts" / "aoitalk_plugin_stdio.py"
             params = StdioServerParameters(
                 command=sys.executable,
                 args=[str(launcher)],
@@ -1264,13 +1264,13 @@ class StdioCliSessionTests(unittest.TestCase):
                         listing = {tool.name: tool for tool in (await session.list_tools()).tools}
                         expected = {fn.__name__ for fn in cli.TOOLS}
                         self.assertTrue(expected <= set(listing))
-                        # 92 pre-existing tools plus the generic Agent task tools.
+                        # The dedicated catalog retains the API Agent task tools.
                         agent_task_tools = {"aoitalk_agent_task_start", "aoitalk_agent_task_status",
                                             "aoitalk_agent_task_tail", "aoitalk_agent_task_result",
                                             "aoitalk_agent_task_cancel"}
                         self.assertEqual(agent_task_tools, {fn.__name__ for fn in agent_tasks.TOOLS})
                         self.assertTrue(agent_task_tools <= set(listing))
-                        self.assertEqual(len(listing), 92 + len(agent_task_tools))
+                        self.assertEqual(len(listing), 35)
                         result_tool = listing["aoitalk_agent_task_result"]
                         self.assertTrue(result_tool.annotations.read_only_hint)
                         self.assertFalse(result_tool.annotations.destructive_hint)

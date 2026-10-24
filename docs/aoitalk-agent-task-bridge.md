@@ -1,6 +1,6 @@
-# Generic AoiTalk Agent task bridge
+# AoiTalk API Agent task bridge
 
-Use the generic Agent task tools when a published AoiTalk Agent has an API-backed provider route:
+The five `aoitalk_agent_task_*` API Agent tools are exposed only through the dedicated AoiTalk MCP connection. Use them when a published AoiTalk Agent has an API-backed provider route:
 
 - `aoitalk_agent_task_start`
 - `aoitalk_agent_task_status`
@@ -50,9 +50,9 @@ Each request re-reads the task without a local cache. Nonzero offsets require
 and restart at zero. Non-successful tasks return `result_not_ready`; missing
 final answers return `result_unavailable`. Malformed responses and upstream
 bodies over 2 MiB are rejected, never silently adopted. Every returned page is
-bounded by the 64 KiB JSON response budget. This gateway change needs no new
-upstream endpoint; an installed gateway must be updated separately before the
-new tool is available in a live tool catalog.
+bounded by the 64 KiB JSON response budget. This change needs no new upstream
+endpoint; the dedicated AoiTalk MCP server must be updated separately before
+the new tool is available in its live catalog.
 
 ## Authentication reuse and Retry-After
 

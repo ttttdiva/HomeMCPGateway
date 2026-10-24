@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -499,10 +500,11 @@ class DedicatedServerTests(unittest.TestCase):
             self.assertIn("aoitalk_catalog", listing)
         asyncio.run(check())
 
-    def test_stdio_catalog_and_existing_21_schemas_match_generic(self):
+    def test_stdio_catalogs_and_dedicated_contracts_survive_generic_removal(self):
         root = Path(__file__).resolve().parents[1]
         generic = root / "scripts" / "gateway_stdio.py"
         dedicated = root / "scripts" / "aoitalk_plugin_stdio.py"
+        contract = json.loads((root / "tests/fixtures/phase_b_catalog_contract.json").read_text(encoding="utf-8"))
 
         async def list_tools(entry: Path, *, enable_generic: bool):
             child_env = os.environ.copy()
@@ -524,12 +526,18 @@ class DedicatedServerTests(unittest.TestCase):
                 *aoitalk_cli_sessions.TOOLS,
             )}
             self.assertEqual(len(dedicated_tools), 35)
-            self.assertEqual(len(generic_tools), 97)
+            self.assertEqual(set(generic_tools), set(contract["generic_names"]))
+            self.assertFalse(any(name.startswith("aoitalk_") for name in generic_tools))
             self.assertEqual(set(dedicated_tools), expected | {fn.__name__ for fn in manage.TOOLS})
-            for name in expected:
-                self.assertEqual(dedicated_tools[name].input_schema, generic_tools[name].input_schema, name)
-                self.assertEqual(dedicated_tools[name].output_schema, generic_tools[name].output_schema, name)
-                self.assertEqual(dedicated_tools[name].annotations, generic_tools[name].annotations, name)
+            self.assertEqual(expected, set(contract["removed_generic_names"]))
+            self.assertEqual(set(dedicated_tools), set(contract["dedicated_contract_sha256"]))
+            for name, tool in dedicated_tools.items():
+                data = tool.model_dump(mode="json")
+                wire = {key: data[key] for key in ("input_schema", "output_schema", "annotations")}
+                digest = hashlib.sha256(json.dumps(
+                    wire, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                ).encode()).hexdigest()
+                self.assertEqual(digest, contract["dedicated_contract_sha256"][name], name)
             self.assertNotIn("run_command", dedicated_tools)
             self.assertNotIn("job_start", dedicated_tools)
             self.assertTrue(dedicated_tools["aoitalk_cli_session_reconnect"].annotations.read_only_hint)

@@ -1370,7 +1370,7 @@ class LogonRecovery(Base):
     def test_log_rotates_with_a_size_cap_and_contains_only_safe_facts(self):
         with mock.patch.object(ws, "LOG_MAX_BYTES", 400), mock.patch.object(ws, "LOG_BACKUPS", 3):
             for i in range(120):
-                ws.log_event(self.dir, "cycle_failed", code="server_error", detail=r"password=fixture-password C:\Users\x\.env", n=i)
+                ws.log_event(self.dir, "cycle_failed", code="server_error", detail='password=fixture-password C:\\path\\to\\fixture\\.env', n=i)
         files = sorted(p.name for p in self.dir.glob(ws.LOG_NAME + "*"))
         self.assertEqual(files, [ws.LOG_NAME, ws.LOG_NAME + ".1", ws.LOG_NAME + ".2", ws.LOG_NAME + ".3"])
         blob = "".join((self.dir / n).read_text(encoding="utf-8") for n in files)

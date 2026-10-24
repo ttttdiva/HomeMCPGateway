@@ -2,12 +2,10 @@
 import json
 import base64
 import io
-import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
 import time
 
 import anyio
@@ -15,7 +13,6 @@ from mcp.client import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from PIL import Image
 from home_mcp_gateway import android, aoitalk, aoitalk_agent_tasks, aoitalk_cli_sessions, aoitalk_tasks, browser_qa, desktop, git_qa, image_library, jobs, readiness
-from home_mcp_gateway import server
 from qa_test_support import local_server
 
 
@@ -28,7 +25,7 @@ FULL_MCP_BASELINE = {
     "download_url", "screenshot", "tool_log_info", "tool_log_summary", "git_find", "git_resolve", "git_status", "git_fetch",
     "git_remote_head", "git_worktree_create", "git_worktree_list", "git_worktree_status",
     "git_worktree_diff", "git_apply_patch", "git_changed_files", "git_worktree_cleanup",
-    "job_start", "job_status", "job_tail", "job_wait", "job_stop", "job_list", "adb_devices",
+    "job_start", "job_status", "job_tail", "job_wait", "job_stop", "job_list", "job_steer", "job_steer_status", "adb_devices",
     "adb_shell", "adb_screenshot", "adb_logcat", "adb_tap", "adb_swipe", "adb_text",
     "adb_keyevent", "adb_install", "adb_start", "adb_stop", "adb_package_info", "wait_tcp",
     "wait_http", "browser_start", "browser_run_plan", "browser_navigate", "browser_page_text",
@@ -61,8 +58,7 @@ class StdioTests(unittest.TestCase):
                             listing = await session.list_tools()
                             ordered_names = [tool.name for tool in listing.tools]
                             names = set(ordered_names)
-                            self.assertEqual(len(names), 76)
-                            self.assertTrue(FULL_MCP_BASELINE.issubset(names), FULL_MCP_BASELINE - names)
+                            self.assertEqual(names, FULL_MCP_BASELINE)
                             self.assertFalse(AOITALK_TOOLS & names)
                             self.assertEqual(ordered_names[:2], ["desktop_observe", "desktop_act"])
                             self.assertFalse({"list_monitors", "screenshot_image", "list_windows", "capture_window"} & names)
@@ -138,16 +134,6 @@ class StdioTests(unittest.TestCase):
                             self.assertEqual(run_event["mcp_method"], "tools/call")
 
         anyio.run(check)
-
-    def test_aoitalk_enable_precedence_and_repo_env_fallback(self):
-        with tempfile.TemporaryDirectory() as root:
-            repo = Path(root)
-            (repo / ".env").write_text("\ufeffHOME_MCP_AOITALK_ENABLED=YeS\n", encoding="utf-8")
-            with patch.object(server, "GATEWAY_ROOT", repo), patch.dict(os.environ, {}, clear=True):
-                self.assertTrue(server._aoitalk_enabled())
-            with patch.object(server, "GATEWAY_ROOT", repo), patch.dict(
-                    os.environ, {"HOME_MCP_AOITALK_ENABLED": "off"}, clear=True):
-                self.assertFalse(server._aoitalk_enabled())
 
     def test_jev_only_discovery_and_tunnel_entrypoint(self):
         async def check():
