@@ -32,7 +32,7 @@ USER = "fixture-user"
 PASSWORD = "fixture-password-${LITERAL}-#-秘密"
 SETTINGS = aoitalk.Settings("http://127.0.0.1:3000", USER, PASSWORD)
 AGENT_ID = "11111111-1111-1111-1111-111111111111"
-WORKSPACE = r"C:\path\to\HomeMCPGateway"
+WORKSPACE = r"D:\Dev\80_HomeMCPGateway"
 SESSION_ID = "11111111-1111-4111-8111-111111111111"
 HTTPX_ASYNC_CLIENT = httpx.AsyncClient
 

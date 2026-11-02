@@ -54,6 +54,64 @@ class TelemetryTests(unittest.TestCase):
             self.assertNotIn("TOP-SECRET-COMMAND", raw)
             self.assertNotIn("secret-output", raw)
 
+    def test_error_logs_only_an_identifier_error_code(self):
+        with tempfile.TemporaryDirectory() as td, patch.dict(
+            os.environ,
+            {"HOME_MCP_TOOL_LOG_DIR": td, "HOME_MCP_TOOL_LOG": "1"},
+            clear=False,
+        ):
+            def sample():
+                raise ValueError("browser_click_tab_hidden: https://example.test/?token=canary")
+
+            with self.assertRaisesRegex(ValueError, "browser_click_tab_hidden"):
+                telemetry.instrument_tool(sample)()
+            files = list(Path(td).glob("*/*.jsonl"))
+            self.assertEqual(len(files), 1)
+            raw = files[0].read_text(encoding="utf-8")
+            event = json.loads(raw.splitlines()[0])
+            self.assertEqual(event["error_code"], "browser_click_tab_hidden")
+            self.assertEqual(event["error_type"], "ValueError")
+            self.assertNotIn("https://", raw)
+            self.assertNotIn("canary", raw)
+
+    def test_tool_error_type_prefix_is_skipped_and_fixed_summary_is_kept(self):
+        cases = [
+            (
+                "RuntimeError: browser_action_failed: TimeoutError: "
+                "Timed out waiting for the element to be visible, enabled and stable.",
+                "browser_action_failed",
+                "TimeoutError: Timed out waiting for the element to be visible, enabled and stable.",
+            ),
+            (
+                "ValueError: browser_click_tab_hidden",
+                "browser_click_tab_hidden",
+                None,
+            ),
+            (
+                "RuntimeError: browser_action_failed: RuntimeError: "
+                "https://example.test/?token=canary",
+                "browser_action_failed",
+                None,
+            ),
+        ]
+        for message, code, summary in cases:
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as td, patch.dict(
+                os.environ,
+                {"HOME_MCP_TOOL_LOG_DIR": td, "HOME_MCP_TOOL_LOG": "1"},
+                clear=False,
+            ):
+                def sample(message=message):
+                    raise RuntimeError(message)
+
+                with self.assertRaises(RuntimeError):
+                    telemetry.instrument_tool(sample)()
+                raw = next(Path(td).glob("*/*.jsonl")).read_text(encoding="utf-8")
+                event = json.loads(raw.splitlines()[0])
+                self.assertEqual(event["error_code"], code)
+                self.assertEqual(event.get("error_summary"), summary)
+                self.assertNotIn("canary", raw)
+                self.assertNotIn("https://", raw)
+
     def test_middleware_records_mcp_ids_and_gateway_timing(self):
         class Connection:
             session_id = "transport-session-123"

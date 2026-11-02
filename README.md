@@ -86,10 +86,10 @@ Home MCP Gateway は、Windows PC 上で動くローカル MCP サーバーを O
 
 既存profileのAPI keyは `env:CONTROL_PLANE_API_KEY` 参照です。`run` 自体はリポジトリの `.env` を読み込みません。また、`connect_tunnel.ps1` は終了時に呼出元の環境を元へ戻すため、その実行後もキーがPowerShellに残るとは限りません。次の例は既存スクリプトと同じく `.env` を文字列として読み、キーを表示・コマンド引数へ展開せず、終了時に環境を復元します。
 
-配置先は新しく開いたPowerShell自身で指定します。`$GatewayRoot`の1行を実際の絶対パスへ変更してください。
+配置先は新しく開いたPowerShell自身で指定します。以下はこのPCの配置例です。別の場所へ配置した場合は、`$GatewayRoot`の1行を実際の絶対パスへ変更してください。
 
 ```powershell
-$GatewayRoot = 'C:\path\to\HomeMCPGateway'
+$GatewayRoot = 'D:\Dev\80_HomeMCPGateway'
 Set-Location -LiteralPath $GatewayRoot
 if (-not (Test-Path -LiteralPath (Join-Path $GatewayRoot '.env') -PathType Leaf)) { throw 'Gateway .env not found.' }
 $GatewaySavedEnv = @{}
@@ -129,10 +129,10 @@ try {
 
 ### 非表示のバックグラウンド運用
 
-本体の可視コンソールが不要で、自動起動を設定済みなら、タスクスケジューラの `Home MCP Gateway` タスクを使います。タスクスケジューラで「実行」を選ぶか、次を実行します。
+本体の可視コンソールが不要で、自動起動を設定済みなら、タスクスケジューラの `80_HomeMCPGateway - ChatGPT` タスクを使います。タスクスケジューラで「実行」を選ぶか、次を実行します。
 
 ```powershell
-Start-ScheduledTask -TaskName 'Home MCP Gateway'
+Start-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
 ```
 
 このタスクの標準Actionは `powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "<repository>\scripts\connect_tunnel.ps1" -Watch` です。非表示で30秒ごとに監視し、異常時に再接続します。タスクが未登録の場合だけ、リポジトリのルートで次を実行して登録します。登録処理はタスクを直ちに起動します。
@@ -146,7 +146,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install_autostart.
 | 入口 | 動作と表示 |
 | --- | --- |
 | `tunnel-client.exe run --profile-dir ... --profile home-mcp --log.file=` | トンネル本体を現在のコンソールで前景実行。上の環境読込が必要 |
-| 登録済み `Home MCP Gateway` タスク | `connect_tunnel.ps1 -Watch` を非表示で継続実行 |
+| 登録済み `80_HomeMCPGateway - ChatGPT` タスク | `connect_tunnel.ps1 -Watch` を非表示で継続実行 |
 | `.\scripts\connect_tunnel.ps1` | process modeで接続・状態確認後、プロンプトへ戻る。runtimeは継続する |
 | `.\scripts\connect_tunnel.ps1 -Watch` | 実行したPowerShell画面で監視役を継続。本体は管理対象の別プロセス |
 | `.\scripts\run_gateway.cmd` | stdio Gateway本体の起動。トンネル接続や管理画面を開くバッチではない |
@@ -167,9 +167,9 @@ if (-not $TunnelClient) { throw '展開先のtunnel-client.exeのフルパスを
 **`.env`やGatewayコードを変更した後は、接続コマンドの再実行だけでなくruntimeを停止して起動し直します。** 登録済みタスクを使う場合は、監視による再接続を止めてから次の順で操作します（`$TunnelClient` は上で確認した実行ファイルです）。
 
 ```powershell
-Stop-ScheduledTask -TaskName 'Home MCP Gateway'
+Stop-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
 & $TunnelClient runtimes stop home-mcp
-Start-ScheduledTask -TaskName 'Home MCP Gateway'
+Start-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
 ```
 
 起動は非同期です。状態確認で3項目がTrueになることを確認し、ChatGPT側でメタデータを更新してください。手動Watchを使っている場合は先にその監視を終了し、runtime停止後に `.\scripts\connect_tunnel.ps1 -Watch` で再開します。`TUNNEL_ALIAS`を変更している場合は、例の `home-mcp` を実際のaliasに置き換えます。
@@ -177,14 +177,14 @@ Start-ScheduledTask -TaskName 'Home MCP Gateway'
 自動起動も止める場合は、タスクを無効化・停止してからruntimeを停止します。再開時はタスクを有効化して実行してください。
 
 ```powershell
-Disable-ScheduledTask -TaskName 'Home MCP Gateway'
-Stop-ScheduledTask -TaskName 'Home MCP Gateway'
+Disable-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
+Stop-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
 & $TunnelClient runtimes stop home-mcp
 ```
 
 ## AoiTalk（任意）
 
-AoiTalk tools は AoiTalk 専用 MCP 接続だけで公開されます。Phase B 以降、汎用 Gateway は常に **78 tools** を公開し、旧 `aoitalk_*` tools を登録しません。`HOME_MCP_AOITALK_ENABLED` はcatalogに影響しない無効な旧flagです。撤去した tool 名と offline catalog 契約は [Phase B の catalog 変更](docs/aoitalk-plugin.md) に記録しています。専用接続は **35 tools**（Clip 3、local task 5、API Agent 5、CLI session 8、管理14）を公開します。認証情報を ChatGPT に渡さないでください。
+AoiTalk tools は AoiTalk 専用 MCP 接続だけで公開されます。Phase B 以降、汎用 Gateway は常に **83 tools** を公開し、旧 `aoitalk_*` tools を登録しません。`HOME_MCP_AOITALK_ENABLED` はcatalogに影響しない無効な旧flagです。撤去した tool 名と offline catalog 契約は [Phase B の catalog 変更](docs/aoitalk-plugin.md) に記録しています。専用接続は **35 tools**（Clip 3、local task 5、API Agent 5、CLI session 8、管理14）を公開します。認証情報を ChatGPT に渡さないでください。
 
 AoiTalk 自体と接続先・認証・必要な機能は別途設定が必要です。この Gateway は AoiTalk をインストールまたは設定しません。専用接続には、別途用意したTunnel IDを `.env` の `HOME_MCP_AOITALK_TUNNEL_ID` に設定し、必要なら `HOME_MCP_AOITALK_RUNTIME_API_KEY` に専用Restricted runtime keyを設定します。専用Tunnelの運用preflight後に `scripts\connect_tunnel.ps1 -Target aoitalk` を使います。既定alias/profileは `aoitalk`、状態とログは `.runtime\aoitalk\`、profileファイルは `.runtime\profiles\aoitalk.yaml` です。自動起動を登録する場合は `scripts\install_autostart.ps1 -Target aoitalk` を使い、既定TaskName `Home MCP Gateway - AoiTalk` を利用します。どちらのコマンドもTunnelを新規発行せず、GUIでのPlugin追加・Refreshは行いません。
 
@@ -195,18 +195,20 @@ AoiTalk 自体と接続先・認証・必要な機能は別途設定が必要で
 
 ## ツールの概要
 
-汎用 Gateway は常に 78 ツールです。主なグループは次のとおりです。
+汎用 Gateway は常に 83 ツールです。主なグループは次のとおりです。
 
 | グループ | 主な内容 |
 | --- | --- |
 | ホスト・ファイル | システム情報、環境変数、ファイルの読み書き、検索、コピー、移動、削除、ハッシュ |
 | コマンド・プロセス | 任意の shell / PowerShell / Python、プロセスの開始・確認・終了 |
 | ネットワーク | 任意の HTTP(S) リクエスト、ダウンロード、TCP / HTTP の readiness 確認 |
-| デスクトップ・端末 | Windows の観測・UI 操作、スクリーンショット（MCPネイティブPNG）、座標系 `screen`/`window`/`normalized` による視覚付き Computer Use（[詳細](docs/computer-use.ja.md)）、Android / ADB |
+| デスクトップ・端末 | Windows の観測・UI 操作、承認済みUnrealプロジェクト向けの有限Held-key QA、スクリーンショット（MCPネイティブPNG）、座標系 `screen`/`window`/`normalized` による視覚付きComputer Use（[詳細](docs/computer-use.ja.md)）、Android / ADB |
 | 開発ワークフロー | Git リポジトリ / worktree、長時間ジョブ、ブラウザ（Playwright） |
 | 画像・診断 | 画像コンテキスト、ツール実行のローカル診断ログ |
 
-別接続の AoiTalk 専用MCPは35 tools（Clip 3、local task 5、API Agent 5、CLI session 8、管理14）を公開します。このcatalogは汎用Gatewayの78 toolsには含まれません。
+ログイン済みEdgeの既存プロファイル・タブを明示選択して利用する方法は、[既存Edge接続ガイド](docs/browser-edge-attach.ja.md)を参照してください。
+
+別接続の AoiTalk 専用MCPは35 tools（Clip 3、local task 5、API Agent 5、CLI session 8、管理14）を公開します。このcatalogは汎用Gatewayの83 toolsには含まれません。
 
 これらのグループにもアクセス制限や read-only 境界が追加されるわけではありません。接続相手とプロンプトを信頼できる範囲に限定してください。
 

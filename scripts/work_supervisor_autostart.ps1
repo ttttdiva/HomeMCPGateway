@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory)][ValidateSet('plan', 'install', 'status', 'disable', 'enable', 'start', 'stop', 'uninstall', 'selftest')][string]$Action,
-    [string]$TaskName = 'Home MCP Work Supervisor'
+    [string]$TaskName = '80_HomeMCPGateway - Agent Job Monitor'
 )
 # Logon-time recovery of the read-only work supervisor observer ONLY (not the Gateway task, not a root model).
 # Same user, Interactive token, Limited, AtLogOn, IgnoreNew.  No password / S4U / SYSTEM / Highest / elevation, no
@@ -90,7 +90,7 @@ switch ($Action) {
         $ok.no_trigger = (Compare-Definition (With $good 'Trigger' 'other') $Desired) -contains 'Trigger'
         Write-Json $ok
     }
-    'plan' { Write-Json ([ordered]@{ taskName = $TaskName; desired = $Desired; gatewayTaskUntouched = 'Home MCP Gateway' }) }
+    'plan' { Write-Json ([ordered]@{ taskName = $TaskName; desired = $Desired; gatewayTaskUntouched = '80_HomeMCPGateway - ChatGPT' }) }
     'install' {
         foreach ($path in $Python, $Script) { if (-not (Test-Path -LiteralPath $path)) { Block 'install' "missing $path" $null } }
         $existing = Get-OwnTask

@@ -84,10 +84,10 @@ The following assumes the initial connection has created `.runtime\profiles\home
 
 The existing profile references `env:CONTROL_PLANE_API_KEY`. `run` does not load the repository's `.env`, and `connect_tunnel.ps1` restores its caller's environment when it exits. The following uses the existing script's literal `.env` loading behavior without printing secrets or placing their values in arguments, and restores the environment on exit:
 
-Set the installation directory inside the newly opened PowerShell itself. Change the path below to your actual absolute installation path.
+Set the installation directory inside the newly opened PowerShell itself. The path below is this PC's example; change the `$GatewayRoot` line to the actual absolute installation path elsewhere.
 
 ```powershell
-$GatewayRoot = 'C:\path\to\HomeMCPGateway'
+$GatewayRoot = 'D:\Dev\80_HomeMCPGateway'
 Set-Location -LiteralPath $GatewayRoot
 if (-not (Test-Path -LiteralPath (Join-Path $GatewayRoot '.env') -PathType Leaf)) { throw 'Gateway .env not found.' }
 $GatewaySavedEnv = @{}
@@ -127,10 +127,10 @@ A direct `run` is not a `runtimes`-managed launch. Do not treat an old managed `
 
 ### Hidden background operation
 
-If a visible tunnel console is unnecessary and autostart is configured, use the existing `Home MCP Gateway` scheduled task. Choose Run in Task Scheduler, or run:
+If a visible tunnel console is unnecessary and autostart is configured, use the existing `80_HomeMCPGateway - ChatGPT` scheduled task. Choose Run in Task Scheduler, or run:
 
 ```powershell
-Start-ScheduledTask -TaskName 'Home MCP Gateway'
+Start-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
 ```
 
 The default task action is `powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "<repository>\scripts\connect_tunnel.ps1" -Watch`. It monitors every 30 seconds and reconnects without a visible window. Only if the task is not registered, install it from the repository root; installation starts it immediately:
@@ -142,7 +142,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install_autostart.
 | Entry point | Behavior and display |
 | --- | --- |
 | `tunnel-client.exe run --profile-dir ... --profile home-mcp --log.file=` | Runs the tunnel itself in the current console; load the environment as shown above |
-| Existing `Home MCP Gateway` task | Runs `connect_tunnel.ps1 -Watch` continuously in a hidden window |
+| Existing `80_HomeMCPGateway - ChatGPT` task | Runs `connect_tunnel.ps1 -Watch` continuously in a hidden window |
 | `.\scripts\connect_tunnel.ps1` | Connects in process mode, checks status, then returns to the prompt; the runtime continues |
 | `.\scripts\connect_tunnel.ps1 -Watch` | Keeps the monitor in the invoking window; the tunnel remains a separately managed process |
 | `.\scripts\run_gateway.cmd` | Starts the stdio Gateway itself; does not connect the tunnel or open its management page |
@@ -163,9 +163,9 @@ if (-not $TunnelClient) { throw 'Assign the full path of the extracted tunnel-cl
 **After changing `.env` or Gateway code, stop and restart the runtime; rerunning the connect command alone is insufficient.** When using the scheduled task, stop its monitoring first, then run the following with the executable selected above:
 
 ```powershell
-Stop-ScheduledTask -TaskName 'Home MCP Gateway'
+Stop-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
 & $TunnelClient runtimes stop home-mcp
-Start-ScheduledTask -TaskName 'Home MCP Gateway'
+Start-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
 ```
 
 Startup is asynchronous. Check that all three status fields become True, then refresh the ChatGPT connection metadata. For manual Watch mode, end that monitor first, stop the runtime, and resume with `.\scripts\connect_tunnel.ps1 -Watch`. Replace `home-mcp` with the actual alias if you changed `TUNNEL_ALIAS`.
@@ -173,14 +173,14 @@ Startup is asynchronous. Check that all three status fields become True, then re
 To also disable autostart, disable and stop the task before stopping the runtime. Re-enable and run the task to resume:
 
 ```powershell
-Disable-ScheduledTask -TaskName 'Home MCP Gateway'
-Stop-ScheduledTask -TaskName 'Home MCP Gateway'
+Disable-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
+Stop-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
 & $TunnelClient runtimes stop home-mcp
 ```
 
 ## AoiTalk (optional)
 
-AoiTalk tools are exposed only through the dedicated AoiTalk MCP connection. Since Phase B, the generic Gateway always exposes **78 tools** and no longer registers the old `aoitalk_*` tools; `HOME_MCP_AOITALK_ENABLED` is an inactive legacy flag and does not affect its catalog. [The Phase B catalog change](docs/aoitalk-plugin.md) records the removed tool names and the offline catalog contract. The dedicated connection exposes **35 tools** (3 Clip, 5 local task, 5 API Agent, 8 CLI session, and 14 management tools). Never send AoiTalk credentials to ChatGPT.
+AoiTalk tools are exposed only through the dedicated AoiTalk MCP connection. Since Phase B, the generic Gateway always exposes **83 tools** and no longer registers the old `aoitalk_*` tools; `HOME_MCP_AOITALK_ENABLED` is an inactive legacy flag and does not affect its catalog. [The Phase B catalog change](docs/aoitalk-plugin.md) records the removed tool names and the offline catalog contract. The dedicated connection exposes **35 tools** (3 Clip, 5 local task, 5 API Agent, 8 CLI session, and 14 management tools). Never send AoiTalk credentials to ChatGPT.
 
 AoiTalk and its endpoint, authentication, and required features must be configured separately. This gateway does not install or configure AoiTalk. Configure a separately provisioned Tunnel ID in `HOME_MCP_AOITALK_TUNNEL_ID`; optionally set a dedicated Restricted runtime key in `HOME_MCP_AOITALK_RUNTIME_API_KEY`. After the separate tunnel preflight, use `scripts\connect_tunnel.ps1 -Target aoitalk`. Its alias/profile is `aoitalk`, status and logs live under `.runtime\aoitalk\`, and its profile is `.runtime\profiles\aoitalk.yaml`. To register its separate autostart task, use `scripts\install_autostart.ps1 -Target aoitalk`; the default task name is `Home MCP Gateway - AoiTalk`. These commands do not create a Tunnel or add/refresh a plugin in the GUI.
 
@@ -188,18 +188,18 @@ See [the dedicated AoiTalk MCP guide](docs/aoitalk-plugin.md) for its tools, ope
 
 ## Tool groups
 
-The generic Gateway always exposes 78 tools. The main groups are:
+The generic Gateway always exposes 83 tools. The main groups are:
 
 | Group | Examples |
 | --- | --- |
 | Host and files | System information, environment variables, file reads/writes, search, copy, move, delete, hashing |
 | Commands and processes | Arbitrary shell / PowerShell / Python, process start, inspection, and termination |
 | Network | Arbitrary HTTP(S) requests, downloads, and TCP / HTTP readiness checks |
-| Desktop and devices | Windows observation/UI actions, screenshots, and Android / ADB |
+| Desktop and devices | Windows observation/UI actions, bounded held-key QA for the approved Unreal project, screenshots, and Android / ADB |
 | Development workflows | Git repositories / worktrees, persistent jobs, and browser sessions (Playwright) |
 | Images and diagnostics | Image context plus local tool-timing diagnostics |
 
-The separate AoiTalk MCP connection exposes 35 tools (3 Clip, 5 local task, 5 API Agent, 8 CLI session, and 14 management tools). They are not included in the generic Gateway's 78-tool catalog.
+The separate AoiTalk MCP connection exposes 35 tools (3 Clip, 5 local task, 5 API Agent, 8 CLI session, and 14 management tools). They are not included in the generic Gateway's 79-tool catalog.
 
 These groups do not create an allowlist or a read-only boundary. Limit connections and prompts to people and workflows you trust.
 

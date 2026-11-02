@@ -4,12 +4,14 @@ from __future__ import annotations
 from contextlib import contextmanager
 from collections import OrderedDict
 from datetime import datetime, timezone
+import asyncio
 import json
 import math
+import ntpath
 import re
 import threading
 import time
-from typing import Literal
+from typing import Annotated, Literal
 import uuid
 import ctypes
 from ctypes import wintypes as w
@@ -17,6 +19,7 @@ import os
 from typing import Any
 
 from mcp.types import CallToolResult, TextContent
+from pydantic import Field
 from PIL import Image, ImageGrab
 import psutil
 
@@ -407,11 +410,25 @@ def _resolve_window(query: str) -> tuple[dict, dict]:
 
 
 
-# Only these two functions are MCP tools. Capture helpers above remain internal.
+# Desktop observation/action tools and the bounded game QA held-key tool.
 _LOCK = threading.RLock()
+_HELD_ACTION_LOCK = threading.Lock()
+_HELD_ACTION_EPOCH = 0
 _OBSERVATIONS: OrderedDict[str, dict] = OrderedDict()
 _OBSERVATION_LIMIT = 64
 IMPLEMENTATION = "windows-workspace-ui-4-computer-use"
+_APPROVED_GAME_ROOT = ntpath.normcase(ntpath.normpath(r"D:\Dev\95_Unferat_Game"))
+_APPROVED_GAME_PROJECT = ntpath.join(_APPROVED_GAME_ROOT, "UnferatGame.uproject")
+_HELD_KEY_ALIASES = {
+    "w": (0x57, "w"), "a": (0x41, "a"), "s": (0x53, "s"), "d": (0x44, "d"),
+    "space": (0x20, "space"), "shift": (0xA0, "shift"), "lshift": (0xA0, "shift"),
+    "leftctrl": (0xA2, "leftctrl"), "lctrl": (0xA2, "leftctrl"),
+}
+_HELD_KEY_MIN_DURATION_MS = 100
+_HELD_KEY_MAX_DURATION_MS = 8000
+_HELD_KEY_MAX_COUNT = 4
+_HELD_KEY_CHECK_INTERVAL_SEC = 0.05
+_HELD_KEY_OBSERVATION_MAX_AGE_SEC = 15
 COORDINATE_SPACES = {
     "screen": "Absolute physical pixels on the virtual desktop (negative values allowed). Default.",
     "window": "Pixels of the observed window image: (0,0) is its top-left pixel. For the default client capture "
@@ -440,6 +457,139 @@ def _remember(identifier: str, snapshot: dict) -> None:
     _OBSERVATIONS[identifier] = snapshot
     while len(_OBSERVATIONS) > _OBSERVATION_LIMIT:
         _OBSERVATIONS.popitem(last=False)
+
+
+class _HeldKeyStop(RuntimeError):
+    def __init__(self, reason: str, message: str):
+        super().__init__(message)
+        self.reason = reason
+
+
+def _approved_unreal_project_process(pid: int, process_create_time: float) -> bool:
+    """Accept only the owned Unferat project Editor or packaged game process."""
+    try:
+        process = psutil.Process(pid)
+        if process.create_time() != process_create_time:
+            return False
+        name = process.name().casefold()
+        executable = ntpath.normcase(ntpath.normpath(process.exe()))
+        if name in {"unrealeditor.exe", "unrealeditor-cmd.exe"}:
+            for raw_arg in process.cmdline():
+                arg = raw_arg.strip().strip('"')
+                for prefix in ("-project=", "--project="):
+                    if arg.casefold().startswith(prefix):
+                        arg = arg[len(prefix):].strip().strip('"')
+                        break
+                if ntpath.normcase(ntpath.normpath(arg)) == ntpath.normcase(_APPROVED_GAME_PROJECT):
+                    return True
+            return False
+
+        # Packaged QA builds live under the exact owned project tree and use
+        # the module's executable name. An unrelated Unreal process is refused.
+        try:
+            inside_project = ntpath.commonpath([executable, _APPROVED_GAME_ROOT]) == _APPROVED_GAME_ROOT
+        except ValueError:
+            inside_project = False
+        return inside_project and executable != _APPROVED_GAME_ROOT and (
+            name == "unferatgame.exe" or (name.startswith("unferatgame-") and name.endswith(".exe")))
+    except (psutil.Error, OSError, ValueError, TypeError):
+        return False
+
+
+def _held_observation(observation_id: str, hwnd: int, expected_pid: int,
+                      expected_process_create_time: float) -> dict:
+    snapshot = _OBSERVATIONS.get(observation_id)
+    if snapshot is None:
+        raise _HeldKeyStop("stale_observation", "Unknown or evicted observation_id; observe the target again")
+    try:
+        observed_at = datetime.fromisoformat(snapshot["timestamp"])
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - observed_at.astimezone(timezone.utc)).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        raise _HeldKeyStop("stale_observation", "Observation timestamp is missing or invalid") from None
+    if age < -1 or age > _HELD_KEY_OBSERVATION_MAX_AGE_SEC:
+        raise _HeldKeyStop("stale_observation", "Observation is older than 15 seconds; observe the target again")
+
+    observed = snapshot.get("window")
+    if observed is None:
+        observed = next((item for item in snapshot.get("windows", []) if item.get("hwnd") == hwnd), None)
+    if not observed or observed.get("hwnd") != hwnd:
+        raise _HeldKeyStop("stale_observation", "The observation does not contain this explicit HWND")
+    if (observed.get("pid") != expected_pid
+            or observed.get("process_create_time") is None
+            or float(observed["process_create_time"]) != expected_process_create_time):
+        raise _HeldKeyStop("identity_changed", "Observed HWND/PID/process-create-time does not match the supplied identity")
+    return observed
+
+
+def _check_held_target(user, hwnd: int, expected_pid: int, expected_process_create_time: float,
+                       observed: dict) -> dict:
+    try:
+        info = _identity(user, hwnd, expected_pid, observed)
+    except Exception as exc:
+        message = str(exc).casefold()
+        if "no longer exists" in message or "window" in message and "exist" in message:
+            reason = "window_closed"
+        elif "ownership" in message or "identity" in message or "process" in message:
+            reason = "identity_changed"
+        else:
+            reason = "target_unavailable"
+        raise _HeldKeyStop(reason, f"Target identity check failed ({type(exc).__name__})") from None
+
+    if info.get("hwnd") != hwnd or info.get("pid") != expected_pid:
+        raise _HeldKeyStop("identity_changed", "Target HWND/PID identity changed")
+    if info.get("process_create_time") is None or float(info["process_create_time"]) != expected_process_create_time:
+        raise _HeldKeyStop("identity_changed", "Target process-create-time changed")
+    if not info.get("visible") or info.get("minimized"):
+        raise _HeldKeyStop("window_not_interactable", "Target window is hidden or minimized")
+    bounds = info.get("bounds") or {}
+    if bounds.get("width", 0) <= 0 or bounds.get("height", 0) <= 0:
+        raise _HeldKeyStop("window_not_interactable", "Target window has no visible geometry")
+    try:
+        client = _client_bounds(user, hwnd)
+        if client.get("width", 0) <= 0 or client.get("height", 0) <= 0 or _is_cloaked(hwnd):
+            raise _HeldKeyStop("window_not_interactable", "Target window is cloaked or has no client area")
+    except _HeldKeyStop:
+        raise
+    except Exception as exc:
+        raise _HeldKeyStop("window_not_interactable", f"Target client area check failed ({type(exc).__name__})") from None
+    foreground = user.GetForegroundWindow()
+    if not foreground or foreground != hwnd:
+        raise _HeldKeyStop("foreground_lost", "Target is not the current foreground window")
+    return info
+
+
+def _held_key_vk_state(user, vk: int) -> bool:
+    return bool(int(user.GetAsyncKeyState(vk)) & 0x8000)
+
+
+async def _held_key_sleep(delay: float) -> None:
+    await asyncio.sleep(delay)
+
+
+def _held_key_release(user, hwnd: int, owned: list[tuple[str, int, int, int]]) -> dict:
+    """Release only accepted downs, in reverse order, recording Win32 and state evidence."""
+    if not owned:
+        return {"required": False, "attempted": False, "verified": None, "keys": []}
+    details = []
+    for name, vk, scan, base_flags in reversed(owned):
+        accepted, state_up, error = False, False, None
+        try:
+            accepted = desktop_input.send(
+                user, [desktop_input.key(vk, scan, base_flags | desktop_input.KEYUP)], hwnd) == 1
+            if not accepted:
+                error = "SendInput did not accept the key-up event"
+        except Exception as exc:
+            error = type(exc).__name__
+        try:
+            state_up = not _held_key_vk_state(user, vk)
+        except Exception as exc:
+            error = error or f"GetAsyncKeyState:{type(exc).__name__}"
+        details.append({"key": name, "keyup_accepted": accepted, "state_up": state_up,
+                        "verified": accepted and state_up, **({"error": error} if error else {})})
+    return {"required": True, "attempted": True,
+            "verified": all(item["verified"] for item in details), "keys": details}
 
 
 
@@ -522,6 +672,8 @@ def desktop_observe(
     if not 1 <= max_elements <= 500 or not 1 <= max_nodes <= 20000 or not 0 <= max_depth <= 64:
         raise ValueError("Use max_elements=1..500, max_nodes=1..20000 and max_depth=0..64")
     with _LOCK:
+        if _HELD_ACTION_LOCK.locked():
+            raise RuntimeError("desktop_busy: a bounded held-key operation is active")
         user = _user32()
         with _physical_pixels(user):
             identifier = uuid.uuid4().hex
@@ -682,6 +834,9 @@ def desktop_act(
     observe_after adds a fresh PNG + metadata to the response; observe_with_uia adds UIA data.
     UIPI/activation failures are errors and input is never retried.
     """
+    held_action_epoch = _HELD_ACTION_EPOCH
+    if _HELD_ACTION_LOCK.locked():
+        raise RuntimeError("desktop_busy: a bounded held-key operation is active")
     if action in _ACTION_ALIASES:
         action, alias_defaults = _ACTION_ALIASES[action]
         button = alias_defaults.get("button", button)
@@ -698,6 +853,10 @@ def desktop_act(
         if expected_pid is None:
             expected_pid = win_info["pid"]
     with _LOCK:
+        if _HELD_ACTION_LOCK.locked():
+            raise RuntimeError("desktop_busy: a bounded held-key operation is active")
+        if held_action_epoch != _HELD_ACTION_EPOCH:
+            raise RuntimeError("desktop_busy: this desktop action overlapped a held-key operation")
         user = desktop_input.configure(_user32())
         with _physical_pixels(user):
             snapshot = None
@@ -803,4 +962,158 @@ def desktop_act(
             )
 
 
-TOOLS = [desktop_observe, desktop_act]
+async def desktop_hold_keys(
+    observation_id: str,
+    hwnd: int,
+    expected_pid: int,
+    expected_process_create_time: float,
+    keys: Annotated[list[str], Field(description=(
+        "Case-insensitive movement names: W, A, S, D, Space, Shift/LShift, LeftCtrl/LCtrl. "
+        "Ctrl/Control without a side, right Ctrl, Alt, Win, and OS/global shortcuts are refused."
+    ))],
+    duration_ms: int,
+) -> dict[str, Any]:
+    """Hold a bounded movement-key chord only in the observed Unferat UE process.
+
+    Requires a fresh desktop_observe result and its exact HWND/PID/process-create-time.
+    The target must be the owned D:\\Dev\\95_Unferat_Game project in UnrealEditor or
+    its packaged UnferatGame executable. Use 1..4 unique keys from W/A/S/D, Space,
+    left Shift, and left Ctrl (LeftCtrl/LCtrl; VK_LCONTROL), with duration_ms=100..8000.
+    Right Ctrl and generic Ctrl aliases are refused. This action never activates a window.
+    It checks foreground and process identity at 20 Hz and synchronously releases
+    accepted key-downs in reverse order on every exit. Result status confirms release,
+    not movement inside the game; inspect the game separately.
+    """
+    if not isinstance(observation_id, str) or not observation_id.strip():
+        raise ValueError("observation_id is required")
+    if isinstance(hwnd, bool) or not isinstance(hwnd, int) or hwnd <= 0:
+        raise ValueError("hwnd must be a positive observed HWND")
+    if isinstance(expected_pid, bool) or not isinstance(expected_pid, int) or expected_pid <= 0:
+        raise ValueError("expected_pid must be a positive observed PID")
+    if (isinstance(expected_process_create_time, bool)
+            or not isinstance(expected_process_create_time, (int, float))
+            or not math.isfinite(expected_process_create_time) or expected_process_create_time <= 0):
+        raise ValueError("expected_process_create_time must be the finite positive value from desktop_observe")
+    if isinstance(duration_ms, bool) or not isinstance(duration_ms, int) or not (
+            _HELD_KEY_MIN_DURATION_MS <= duration_ms <= _HELD_KEY_MAX_DURATION_MS):
+        raise ValueError(f"duration_ms must be an integer from {_HELD_KEY_MIN_DURATION_MS} to {_HELD_KEY_MAX_DURATION_MS}")
+    if not isinstance(keys, list) or not 1 <= len(keys) <= _HELD_KEY_MAX_COUNT:
+        raise ValueError(f"keys must contain 1..{_HELD_KEY_MAX_COUNT} movement keys")
+    canonical_keys, key_vks = [], []
+    for raw_name in keys:
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            raise ValueError("keys must contain only nonempty movement-key names")
+        resolved = _HELD_KEY_ALIASES.get(raw_name.strip().casefold())
+        if resolved is None:
+            raise ValueError("Only W/A/S/D, Space, left Shift, and left Ctrl are allowed; "
+                             "generic/right Ctrl and OS/global shortcut keys are refused")
+        vk, canonical = resolved
+        if vk in key_vks:
+            raise ValueError("Duplicate keys or aliases are not allowed in a held chord")
+        key_vks.append(vk)
+        canonical_keys.append(canonical)
+
+    global _HELD_ACTION_EPOCH
+    if not _HELD_ACTION_LOCK.acquire(blocking=False):
+        raise RuntimeError("desktop_busy: another held-key operation is active")
+    desktop_lock_acquired = False
+    user = None
+    owned: list[tuple[str, int, int, int]] = []
+    first_down_at = None
+    release_started_at = None
+    stop_reason = "duration_elapsed"
+    status = "completed"
+    error_type = None
+    release = {"required": False, "attempted": False, "verified": None, "keys": []}
+    try:
+        if not _LOCK.acquire(blocking=False):
+            raise RuntimeError("desktop_busy: another desktop operation is active")
+        desktop_lock_acquired = True
+        _HELD_ACTION_EPOCH += 1
+        observed = _held_observation(observation_id, hwnd, expected_pid, float(expected_process_create_time))
+        user = desktop_input.configure(_user32())
+        if not _approved_unreal_project_process(expected_pid, float(expected_process_create_time)):
+            raise _HeldKeyStop("unapproved_target", "Target is not the approved Unferat UE Editor/game process")
+        with _physical_pixels(user):
+            _check_held_target(user, hwnd, expected_pid, float(expected_process_create_time), observed)
+        for name, vk in zip(canonical_keys, key_vks):
+            if _held_key_vk_state(user, vk):
+                raise _HeldKeyStop("preheld_user_key", f"Refusing to take ownership of already-down key {name}")
+
+        layout = desktop_input.keyboard_layout(user, hwnd)
+        prepared = []
+        for name, vk in zip(canonical_keys, key_vks):
+            scan = user.MapVirtualKeyExW(vk, 0, layout)
+            flags = desktop_input.EXTENDED if vk in desktop_input.EXTENDED_KEYS else 0
+            prepared.append((name, vk, scan, flags))
+
+        for name, vk, scan, flags in prepared:
+            # Recheck target identity/focus and physical key state immediately
+            # before each down so a chord cannot continue after focus moves.
+            with _physical_pixels(user):
+                _check_held_target(user, hwnd, expected_pid, float(expected_process_create_time), observed)
+            if _held_key_vk_state(user, vk):
+                raise _HeldKeyStop("preheld_user_key", f"Refusing to take ownership of already-down key {name}")
+            accepted = desktop_input.send(user, [desktop_input.key(vk, scan, flags)], hwnd,
+                                          require_foreground=True)
+            if accepted != 1:
+                raise RuntimeError("SendInput did not accept one key-down event")
+            owned.append((name, vk, scan, flags))
+            if first_down_at is None:
+                first_down_at = time.monotonic()
+
+        deadline = first_down_at + duration_ms / 1000
+        while True:
+            with _physical_pixels(user):
+                _check_held_target(user, hwnd, expected_pid, float(expected_process_create_time), observed)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await _held_key_sleep(min(_HELD_KEY_CHECK_INTERVAL_SEC, remaining))
+    except asyncio.CancelledError:
+        # The coroutine owns the accepted downs, so cancellation is converted
+        # into a stopped receipt after synchronous release below.
+        status, stop_reason = "cancelled", "cancelled"
+    except _HeldKeyStop as exc:
+        status = "aborted" if owned else "rejected"
+        stop_reason = exc.reason
+        error_type = type(exc).__name__
+    except Exception as exc:
+        status = "aborted" if owned else "failed"
+        stop_reason = "input_error"
+        error_type = type(exc).__name__
+    finally:
+        if owned and user is not None:
+            release_started_at = time.monotonic()
+            release = _held_key_release(user, hwnd, owned)
+        if desktop_lock_acquired:
+            _LOCK.release()
+        _HELD_ACTION_LOCK.release()
+
+    held_until = release_started_at if release_started_at is not None else time.monotonic()
+    held_duration_ms = round(max(0.0, held_until - first_down_at) * 1000) if first_down_at else 0
+    if status == "completed" and release.get("verified") is not True:
+        status, stop_reason = "failed", "release_unverified"
+    result = {
+        "ok": status == "completed" and release.get("verified") is True,
+        "status": status,
+        "stop_reason": stop_reason,
+        "observation_id": observation_id,
+        "hwnd": hwnd,
+        "target_pid": expected_pid,
+        "process_create_time": float(expected_process_create_time),
+        "keys": canonical_keys,
+        "input_scope": "global_sendinput_foreground_guarded",
+        "requested_duration_ms": duration_ms,
+        "held_duration_ms": held_duration_ms,
+        "input_started": bool(owned),
+        "release": release,
+        "verification": {"status": "unknown", "kind": "application_effect"},
+        "retry_policy": "observe_before_retry",
+    }
+    if error_type:
+        result["error_type"] = error_type
+    return result
+
+
+TOOLS = [desktop_observe, desktop_act, desktop_hold_keys]

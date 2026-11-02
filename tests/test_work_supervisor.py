@@ -1340,7 +1340,7 @@ class LogonRecovery(Base):
         blob = json.dumps(plan).lower()
         for word in ("password", "s4u", "highest", "system", "runas", "token", "secret", ".env"):
             self.assertNotIn(word, blob.replace("gatewaytaskuntouched", ""))
-        self.assertEqual(plan["taskName"], "Home MCP Work Supervisor")
+        self.assertEqual(plan["taskName"], "80_HomeMCPGateway - Agent Job Monitor")
         self.assertNotEqual(plan["taskName"], plan["gatewayTaskUntouched"])
 
     @unittest.skipUnless(__import__("os").name == "nt", "Windows only")
@@ -1370,7 +1370,7 @@ class LogonRecovery(Base):
     def test_log_rotates_with_a_size_cap_and_contains_only_safe_facts(self):
         with mock.patch.object(ws, "LOG_MAX_BYTES", 400), mock.patch.object(ws, "LOG_BACKUPS", 3):
             for i in range(120):
-                ws.log_event(self.dir, "cycle_failed", code="server_error", detail='password=fixture-password C:\\path\\to\\fixture\\.env', n=i)
+                ws.log_event(self.dir, "cycle_failed", code="server_error", detail=r"password=fixture-password C:\Users\x\.env", n=i)
         files = sorted(p.name for p in self.dir.glob(ws.LOG_NAME + "*"))
         self.assertEqual(files, [ws.LOG_NAME, ws.LOG_NAME + ".1", ws.LOG_NAME + ".2", ws.LOG_NAME + ".3"])
         blob = "".join((self.dir / n).read_text(encoding="utf-8") for n in files)
@@ -1483,11 +1483,15 @@ class FollowUpBetweenPolls(Base):
     def test_listed_change_hint_triggers_collection_immediately(self):
         client = FakeClient(sessions={S1: {"provider": "claude-cli", "status": "completed", "updated_at": "2026-10-22T10:00:00Z"}},
                             events={S1: [chunk(RUN_A, M1, 0, 1, 0, "A body"), done(RUN_A, M1)]})
-        for _ in range(3):
-            self.poll(client)
+        # Keep local poll time before the fixture's remote updated_at hints.
+        # Comparing a 2026-10-22 fixture timestamp with the real test-run date
+        # would make the change hint stale and turn this into a clock-dependent test.
+        now = ws.parse_time("2026-10-21T10:00:00Z")
+        for step in range(3):
+            self.poll(client, now=now + step)
         client.events[S1] += [chunk(RUN_B, M2, 0, 1, 0, "B body"), done(RUN_B, M2)]
         client.sessions[S1]["updated_at"] = "2026-10-23T10:00:00Z"
-        status = self.poll(client)                       # default 120s recheck window: only the hint can explain this
+        status = self.poll(client, now=now + 3)           # default recheck window: only the hint can explain this
         self.assertIn(hid(RUN_B, M2), handoff_ids(status))
 
     def test_quiet_terminal_sessions_are_not_rechecked_every_poll(self):

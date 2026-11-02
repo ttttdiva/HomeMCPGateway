@@ -2,6 +2,7 @@
 import json
 import base64
 import io
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -17,7 +18,7 @@ from qa_test_support import local_server
 
 
 FULL_MCP_BASELINE = {
-    "desktop_observe", "desktop_act", "system_info", "get_environment", "set_environment", "local_read_plan",
+    "desktop_observe", "desktop_act", "desktop_hold_keys", "system_info", "get_environment", "set_environment", "local_read_plan",
     "list_directory", "glob_paths", "search_text", "path_info", "read_text", "write_text",
     "append_text", "read_file_base64", "write_file_base64", "make_directory", "copy_path",
     "move_path", "delete_path", "hash_file", "run_command", "run_powershell", "run_python",
@@ -28,7 +29,11 @@ FULL_MCP_BASELINE = {
     "job_start", "job_status", "job_tail", "job_wait", "job_stop", "job_list", "job_steer", "job_steer_status", "adb_devices",
     "adb_shell", "adb_screenshot", "adb_logcat", "adb_tap", "adb_swipe", "adb_text",
     "adb_keyevent", "adb_install", "adb_start", "adb_stop", "adb_package_info", "wait_tcp",
-    "wait_http", "browser_start", "browser_run_plan", "browser_navigate", "browser_page_text",
+    "wait_http", "browser_start", "browser_attach_edge", "browser_open_tab", "browser_list_tabs",
+    "browser_select_tab", "browser_close_tab", "browser_drag", "browser_set_viewport", "browser_reset_viewport",
+    "browser_capture_frames_start",
+    "browser_capture_frames_stop", "browser_track_boxes_start", "browser_track_boxes_stop", "browser_detach",
+    "browser_run_plan", "browser_navigate", "browser_page_text",
     "browser_find", "browser_click", "browser_fill", "browser_keyboard", "browser_screenshot",
     "browser_errors", "browser_close", "image_library_register_context",
 }
@@ -146,11 +151,93 @@ class StdioTests(unittest.TestCase):
                         info = await session.initialize()
                         self.assertEqual(info.server_info.name, "Home MCP Jev Browser")
                         listing = await session.list_tools()
-                        self.assertEqual([tool.name for tool in listing.tools], ["browser_run_plan"])
+                        self.assertEqual([tool.name for tool in listing.tools], [
+                            "browser_attach_edge", "browser_open_tab", "browser_list_tabs", "browser_select_tab",
+                            "browser_close_tab", "browser_click", "browser_fill", "browser_keyboard", "browser_find",
+                            "browser_drag", "browser_set_viewport", "browser_reset_viewport",
+                            "browser_capture_frames_start",
+                            "browser_capture_frames_stop", "browser_track_boxes_start", "browser_track_boxes_stop",
+                            "browser_detach", "browser_run_plan",
+                        ])
+                        tools = {tool.name: tool for tool in listing.tools}
+                        for name in ("browser_click", "browser_fill"):
+                            properties = tools[name].input_schema["properties"]
+                            self.assertTrue({"within", "test_id", "nth", "guard_url", "guard_url_prefix"} <= set(properties))
+                        for name in ("browser_keyboard", "browser_find"):
+                            properties = tools[name].input_schema["properties"]
+                            self.assertTrue({"guard_url", "guard_url_prefix"} <= set(properties))
+                        self.assertNotIn("browser_page_text", tools)
 
             tunnel = (root / "scripts" / "connect_tunnel.ps1").read_text(encoding="utf-8")
             self.assertIn("gateway_stdio.py", tunnel)
             self.assertNotIn("jev_browser_stdio.py", tunnel)
+
+        anyio.run(check)
+
+    def test_jev_browser_japanese_instruction_round_trips_over_stdio_without_receipt_echo(self):
+        async def check():
+            root = Path(__file__).resolve().parents[1]
+            fixture = Path(__file__).with_name("jev_browser_utf8_stdio_fixture.py").resolve()
+            with tempfile.TemporaryDirectory() as temp_dir:
+                capture_dir = Path(temp_dir) / "capture"
+                log_dir = Path(temp_dir) / "tool-logs"
+                environment = os.environ.copy()
+                environment.update({
+                    "HOME_MCP_UTF8_CAPTURE_DIR": str(capture_dir),
+                    "HOME_MCP_TOOL_LOG_DIR": str(log_dir),
+                    "HOME_MCP_TOOL_LOG": "1",
+                })
+                params = StdioServerParameters(
+                    command=sys.executable, args=[str(fixture)], env=environment
+                )
+                instruction = "「AoiDotsの送信欄」を選択してください"
+                fill_value = "utf8-fill-secret-canary"
+                with anyio.fail_after(45):
+                    async with stdio_client(params) as (read, write):
+                        async with ClientSession(read, write) as session:
+                            await session.initialize()
+                            plan = await session.call_tool("browser_run_plan", {
+                                "session_id": "utf8-fixture-session",
+                                "steps": [{"action": "fill", "instruction": instruction, "value": "fixture"}],
+                                "max_steps": 1,
+                            })
+                            self.assertFalse(plan.is_error, plan)
+                            self.assertEqual(plan.structured_content["status"], "steps_completed")
+                            self.assertNotIn(
+                                instruction,
+                                json.dumps(plan.structured_content, ensure_ascii=False),
+                            )
+                            receipt_event = next(
+                                event for event in plan.structured_content["trace"]
+                                if event.get("event") == "decision"
+                            )
+                            receipt = receipt_event["receipt"]
+                            self.assertEqual(receipt["outcome"], "succeeded")
+                            self.assertNotIn("instruction", receipt)
+                            self.assertNotIn(instruction, json.dumps(receipt, ensure_ascii=False))
+                            plan = await session.call_tool("browser_fill", {
+                                "session_id": "utf8-fixture-session",
+                                "selector": "#composer",
+                                "value": fill_value,
+                                "verify_value": False,
+                                "guard_url_prefix": "http://127.0.0.1:3002/utf8-fixture",
+                            })
+                            self.assertFalse(plan.is_error, plan)
+                            self.assertNotIn(fill_value, json.dumps(plan.structured_content, ensure_ascii=False))
+
+                capture = json.loads((capture_dir / "received-instruction.json").read_text(encoding="utf-8"))
+                expected = "Enter text into the browser element described by this trusted target: " + instruction
+                self.assertEqual(capture["instruction"], expected)
+                self.assertEqual(capture["instruction"].encode("utf-8").decode("utf-8"), expected)
+                logs = list(log_dir.rglob("*.jsonl"))
+                self.assertEqual(len(logs), 1)
+                log_text = logs[0].read_text(encoding="utf-8")
+                self.assertNotIn(instruction, log_text)
+                self.assertNotIn(fill_value, log_text)
+                self.assertNotIn("\ufffd", log_text)
+                events = [json.loads(line) for line in log_text.splitlines()]
+                fill_event = next(event for event in events if event["tool"] == "browser_fill")
+                self.assertEqual(fill_event["args"]["value"], {"type": "str", "chars": len(fill_value)})
 
         anyio.run(check)
 

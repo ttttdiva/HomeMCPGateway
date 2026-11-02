@@ -130,6 +130,15 @@ class DesktopInputTests(unittest.TestCase):
              patch.object(ctypes, 'get_last_error', return_value=0, create=True):
             self.assertEqual(d.send(user, d.unicode_inputs('a')), 2)
 
+    def test_targeted_keydown_refuses_a_lost_or_null_foreground(self):
+        user = self.user()
+        for foreground in (0, 456):
+            with self.subTest(foreground=foreground):
+                user.GetForegroundWindow.return_value = foreground
+                with self.assertRaisesRegex(RuntimeError, "lost foreground"):
+                    d.send(user, [d.key(0x57)], hwnd=123, require_foreground=True)
+        user.SendInput.assert_not_called()
+
     def test_click_and_double_click_are_atomic_input_batches(self):
         user = self.user()
         for action, count in [('click', 3), ('double_click', 5)]:

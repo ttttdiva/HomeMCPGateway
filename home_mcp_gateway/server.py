@@ -44,7 +44,7 @@ mcp = MCPServer(
     middleware=[telemetry.ToolTelemetryMiddleware()],
 )
 
-# Register the two real-desktop Computer Use tools first. Some remote MCP
+# Register the real-desktop Computer Use tools first. Some remote MCP
 # consumers cache or cap large tool catalogs; keeping these first makes the
 # primary observe -> act -> verify workflow available even on constrained
 # clients. The full server still exposes every tool over normal MCP discovery.

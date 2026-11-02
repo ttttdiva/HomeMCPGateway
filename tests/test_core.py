@@ -415,7 +415,7 @@ class CoreTests(unittest.TestCase):
             info = core.system_info()['gateway']
         self.assertEqual(info['pid'], os.getpid())
         self.assertEqual(info['desktop_implementation'], 'loaded-test-marker')
-        self.assertEqual(info['desktop_tools'], ['desktop_observe', 'desktop_act'])
+        self.assertEqual(info['desktop_tools'], ['desktop_observe', 'desktop_act', 'desktop_hold_keys'])
         self.assertEqual(info['uia_backend'], 'UIAutomationCore.COM')
 
 

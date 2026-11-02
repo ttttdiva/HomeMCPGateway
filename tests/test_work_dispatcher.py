@@ -561,6 +561,52 @@ class DispatchTests(Base):
 
 
 class ObservationTests(Base):
+    async def test_legacy_terminal_reconcile_clears_execution_uncertainty(self):
+        for terminal_status in ("succeeded", "failed"):
+            with self.subTest(terminal_status=terminal_status):
+                if terminal_status == "failed":
+                    self.fresh()
+                raw = manifest(jobs=[job("j1")])
+                self.arm(raw)
+                d = self.d()
+                await d.step()
+                sent = self.jobs()["j1"]
+                self.assertEqual((sent["state"], sent["maybe_executing"]), ("sent", 1))
+                obs = self.observer()
+                self.add_run(obs, sent["session_id"], sent["run_id"], status=terminal_status,
+                             handoff=terminal_status == "succeeded")
+
+                d.reconcile()
+
+                row = self.jobs()["j1"]
+                self.assertEqual(row["state"], terminal_status)
+                self.assertEqual(row["maybe_executing"], 0)
+                obs.close()
+
+    async def test_status_projection_masks_only_persisted_terminal_uncertainty(self):
+        states = {
+            "success-old": "succeeded",
+            "failure-old": "failed",
+            "not-launched-old": "not_launched",
+            "unknown-blocked": "blocked",
+            "sent": "sent",
+            "running": "running",
+            "result-pending": "result_pending",
+        }
+        self.arm(manifest(jobs=[job(key) for key in states.keys()]))
+        for job_id, state in states.items():
+            self.conn.execute("UPDATE jobs SET state=?, maybe_executing=1, blocked_code=? WHERE job_id=?",
+                              (state, "job_status_unknown" if state == "blocked" else None, job_id))
+
+        status = wd.build_status(self.conn, self.clock.t)["manifests"][0]
+        projected = {row["job_id"]: row["maybe_executing"] for row in status["jobs"]}
+        persisted = {row["job_id"]: row["maybe_executing"] for row in self.conn.execute("SELECT job_id, maybe_executing FROM jobs")}
+
+        self.assertEqual({job_id for job_id, value in projected.items() if not value},
+                         {"success-old", "failure-old", "not-launched-old"})
+        self.assertTrue(all(projected[job_id] for job_id in ("unknown-blocked", "sent", "running", "result-pending")))
+        self.assertTrue(all(value == 1 for value in persisted.values()))  # projection only; no migration/writeback
+
     async def dispatched(self, **over):
         self.arm(manifest(jobs=[job("j1")], **over))
         d = self.d()

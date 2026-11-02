@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
+import re
 import subprocess
 import sys
 import threading
@@ -16,9 +18,26 @@ import math
 import psutil
 
 from .core import _decode
+from .job_environment import build_job_environment
 from .work_dispatcher_codex import APP_SERVER_TRANSPORT
 
 ACTIVE = {"starting", "running", "stopping"}
+_SAVE_RETRY_DEADLINE_SEC = 10.0
+_SAVE_RETRY_INITIAL_SEC = 0.025
+_SAVE_RETRY_MAX_SEC = 0.25
+_WORKER_FAILURE_STAGES = {
+    "worker_pid_metadata_save",
+    "launch_fence_consumed_metadata_save",
+    "worker_error_metadata_save",
+}
+_WORKER_FAILURE_MESSAGES = {
+    "Metadata replacement hit a Windows sharing violation.",
+    "Metadata replacement was denied by the operating system.",
+    "Worker metadata could not be persisted before process launch.",
+    "Worker error state could not be persisted.",
+    "Worker operation failed; argument and environment values are omitted.",
+    "Worker metadata update failed; detailed error text was omitted.",
+}
 
 
 def process_create_time(proc: subprocess.Popen) -> float:
@@ -62,16 +81,77 @@ def _save(path: Path, data: dict) -> None:
             json.dump(data, stream, ensure_ascii=False, indent=2)
             stream.flush()
             os.fsync(stream.fileno())
-        for attempt in range(20):
+        deadline = time.monotonic() + _SAVE_RETRY_DEADLINE_SEC
+        delay = _SAVE_RETRY_INITIAL_SEC
+        while True:
             try:
                 temp.replace(path)
-                break
-            except PermissionError:
-                if attempt == 19:
+                return
+            except OSError as exc:
+                if not _retryable_metadata_replace_error(exc):
                     raise
-                time.sleep(.025)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                time.sleep(min(delay, remaining))
+                delay = min(delay * 2, _SAVE_RETRY_MAX_SEC)
     finally:
         temp.unlink(missing_ok=True)
+
+
+def _retryable_metadata_replace_error(exc: OSError) -> bool:
+    return isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in {5, 32, 33}
+
+
+def _open_file_share_delete(path: Path):
+    """Open a metadata file with FILE_SHARE_DELETE on Windows."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+    share_mode = 0x00000001 | 0x00000002 | 0x00000004  # READ | WRITE | DELETE
+    handle = create_file(
+        str(path), 0x80000000, share_mode, None, 3, 0x00000080, None  # GENERIC_READ, OPEN_EXISTING, NORMAL
+    )
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        fd = msvcrt.open_osfhandle(int(handle), os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        close_handle(handle)
+        raise
+    try:
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+@contextmanager
+def _open_metadata_read(path: Path):
+    """Use delete-sharing on Windows; fall back to ordinary binary open if unavailable."""
+    stream = None
+    if os.name == "nt":
+        try:
+            stream = _open_file_share_delete(path)
+        except Exception:
+            stream = None
+    if stream is None:
+        stream = path.open("rb")
+    try:
+        yield stream
+    finally:
+        stream.close()
 
 
 def _read(path: Path) -> dict:
@@ -80,12 +160,50 @@ def _read(path: Path) -> dict:
     # permission errors and malformed/missing metadata still propagate.
     for attempt in range(20):
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            with _open_metadata_read(path) as stream:
+                return json.loads(stream.read().decode("utf-8"))
         except PermissionError:
             if attempt == 19:
                 raise
             time.sleep(.025)
     raise AssertionError("unreachable metadata read state")
+
+
+def _read_worker_failure(directory: Path) -> dict[str, Any] | None:
+    """Return only the fixed, bounded diagnostic fields from a worker sidecar."""
+    try:
+        failure = json.loads((directory / "worker.failure.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(failure, dict) or type(failure.get("schema")) is not int or failure["schema"] != 1:
+        return None
+    stage = failure.get("stage")
+    exception_type = failure.get("exception_type")
+    if not isinstance(stage, str) or stage not in _WORKER_FAILURE_STAGES or not isinstance(exception_type, str) or not re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_.]{0,79}", exception_type
+    ):
+        return None
+    message = failure.get("message")
+    if not isinstance(message, str) or message not in _WORKER_FAILURE_MESSAGES:
+        message = "Worker metadata update failed; detailed error text was omitted."
+    at_utc = failure.get("at_utc")
+    if not isinstance(at_utc, str) or not re.fullmatch(
+        r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?Z", at_utc
+    ):
+        at_utc = ""
+    worker_pid = failure.get("worker_pid")
+    if type(worker_pid) is not int or worker_pid <= 0:
+        worker_pid = None
+    safe: dict[str, Any] = {
+        "stage": stage,
+        "exception_type": exception_type,
+        "errno": failure.get("errno") if type(failure.get("errno")) is int else None,
+        "winerror": failure.get("winerror") if type(failure.get("winerror")) is int else None,
+        "message": str(message)[:200],
+        "at_utc": at_utc,
+        "worker_pid": worker_pid,
+    }
+    return safe
 
 
 def _explicit_env_digest(env: dict[str, str] | None) -> str:
@@ -238,7 +356,11 @@ def job_start(command: str | list[str], cwd: str | None = None, env: dict[str, s
               request_fingerprint: str | None = None,
               dispatcher_binding: dict[str, Any] | None = None,
               transport: str | None = None, app_server: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Start a persistent Windows workspace job. String command uses the workspace shell; argv list avoids shell quoting. Returns job ID, identity, logs and Git provenance."""
+    """Start a persistent workspace job with allowlisted inherited environment.
+
+    String commands use the workspace shell; argv avoids shell quoting. Explicit
+    ``env`` values overlay the filtered parent environment unchanged.
+    """
     keyed = idempotency_key is not None
     if keyed:
         if (not isinstance(idempotency_key, str) or not idempotency_key or len(idempotency_key) > 512
@@ -262,8 +384,7 @@ def job_start(command: str | list[str], cwd: str | None = None, env: dict[str, s
                 raise ValueError("app_server_environment_not_pinned")
         except (ValueError, TypeError, OSError, UnicodeError):
             return {"ok": False, "error": "invalid_app_server_spec", "status": "unknown"}
-    child_env = dict(os.environ)
-    child_env.update(env or {})
+    child_env, env_metadata = build_job_environment(os.environ, env)
     explicit_env_digest = _explicit_env_digest(env) if keyed else None
     request_hash = (_keyed_fingerprint_from_env_digest(command, working, explicit_env_digest, request_fingerprint, dispatcher_binding,
                                                        transport, app_server)
@@ -302,7 +423,7 @@ def job_start(command: str | list[str], cwd: str | None = None, env: dict[str, s
                 "cwd": working, "started_at": time.time(), "finished_at": None, "status": "starting",
                 "exit_code": None, "worker_pid": None, "worker_create_time": None,
                 "stdout_path": str(directory / "stdout.log"), "stderr_path": str(directory / "stderr.log"),
-                "worker_log_path": str(directory / "worker.log"),
+                "worker_log_path": str(directory / "worker.log"), **env_metadata,
                 "runtime_dir": str(runtime_root(runtime_dir))}
     if keyed:
         metadata.update(idempotency_key=idempotency_key, request_fingerprint=request_hash,
@@ -389,6 +510,16 @@ def job_status(job_id: str, runtime_dir: str | None = None) -> dict[str, Any]:
         finalized = _read(_directory(job_id, runtime_dir) / "metadata.json")
         if finalized["status"] not in ACTIVE:
             result.update(finalized)
+    if (result["status"] == "starting"
+            and result["process_identity"] in {"missing", "pid_reused"}
+            and result["worker_identity"] in {"missing", "pid_reused"}):
+        worker_failure = _read_worker_failure(_directory(job_id, runtime_dir))
+        if worker_failure is not None:
+            result.update(
+                status="unknown",
+                error_code="worker_metadata_save_failed",
+                error_detail=worker_failure,
+            )
     if result["status"] in ACTIVE:
         if (result.get("transport") == APP_SERVER_TRANSPORT and result["worker_identity"] in {"missing", "pid_reused"}
                 and result["process_identity"] == "alive"):

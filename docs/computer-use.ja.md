@@ -1,6 +1,6 @@
 # Computer Use（視覚付きデスクトップ操作）
 
-`desktop_observe` と `desktop_act` は、特定のAIクライアントに依存しない通常のMCPツールです。
+`desktop_observe`、`desktop_act`、`desktop_hold_keys` は、特定のAIクライアントに依存しない通常のMCPツールです。
 クライアント側の分岐や専用処理はありません。MCPクライアントに Gateway を登録するだけで使えます。
 
 ```text
@@ -68,6 +68,50 @@ Windows Graphics Capture は DWM の合成結果を取得するため、Blender 
 `modifiers=["Ctrl","Shift","Alt","Win"]` はポインター操作の間だけ押し続けます（Ctrl+クリック、
 Alt+中ボタンドラッグなど）。操作が失敗しても必ず離します。キーはCtrl/Shift/Altを左側の仮想キーで送り、
 テンキーは `NumPad0`〜`NumPad9` で指定します。
+
+## desktop_hold_keys（ゲームQA用）
+
+`desktop_hold_keys` は有限時間だけゲーム移動キーを押し続け、関数内で解放する専用ツールです。通常の
+`desktop_act` のキー操作は従来どおり短い押下です。例:
+
+```text
+observed = desktop_observe(mode="window", hwnd=<対象HWND>, expected_pid=<対象PID>)
+desktop_hold_keys(
+    observation_id=observed.observation_id,
+    hwnd=observed.window.hwnd,
+    expected_pid=observed.window.pid,
+    expected_process_create_time=observed.window.process_create_time,
+    keys=["shift", "w"],
+    duration_ms=4550,
+)
+```
+
+必須引数は `observation_id`、`hwnd`、`expected_pid`、`expected_process_create_time`、`keys`、
+`duration_ms` です。観測は呼出し時点から15秒以内で、キャッシュ内に残っている必要があります。HWND、PID、
+プロセス作成時刻の3つが観測内容と完全一致し、対象ウィンドウが表示中・最小化されておらず、現在の前景
+ウィンドウである場合だけ入力します。対象の自動アクティブ化はしません。
+
+対象は `D:\Dev\95_Unferat_Game\UnferatGame.uproject` を開いている Unreal Editor、または同プロジェクト
+配下の `UnferatGame` パッケージ実行ファイルに限定します。別の Unreal プロジェクトや他アプリには入力しません。
+`keys` は `W`、`A`、`S`、`D`、`Space`、左 `Shift`、左 `Ctrl` のみで、1〜4個の重複しないキーを指定します。
+左Ctrlは `LeftCtrl` または `LCtrl` で指定し、`VK_LCONTROL`（0xA2）として送ります。右Ctrl、左右不定の `Ctrl` /
+`Control`、Alt、Win、ファンクションキー、OSショートカットなどは拒否します。`duration_ms` は整数100〜8000です。1回に
+最大4個のキーを押し、同時Held-key要求は1つ、前景・プロセス確認は50ms間隔（20Hz）です。
+
+押下前に `GetAsyncKeyState` の現在状態（high bit）を見て、すでに物理的に押されているキーがあれば入力を
+拒否します。操作が押したキーだけを逆順に解放し、`SendInput` が解放を受理したことと、解放後にhigh bitが
+下がったことを応答の `release.keys[].verified` で報告します。`release.verified` が `true` でない場合は成功を
+返しません。前景喪失、ウィンドウ消失、PID再利用、キャンセル、入力エラー時は追加の押下を止め、受理済みの
+キーだけを解放します。アプリ内で移動できたかは自動判定しないため `verification.status` は `unknown` です。
+
+通常のキャンセルは非同期ツール内で同期解放してから `status="cancelled"` のreceiptを返します。検出遅延は
+通常50ms以内ですが、イベントループの停止やOSの入力API遅延はこの上限に加わります。プロセス強制終了、OS停止、
+ハードウェア障害時にPythonのfinally処理を保証することはできません。`SendInput` はHWNDを指定するAPIではなく、
+前景に対するシステム入力です。各押下直前にも前景を検査しますが、検査からWin32呼出しまでの極短い競合や、
+フォーカス喪失後に必要な解放キーの配送先を原子的に固定できません。応答の
+`input_scope="global_sendinput_foreground_guarded"` はこの制約を示します。Windowsのキー状態APIは、押下後に
+ユーザーが物理キーを押した場合に物理入力と合成入力を区別できず、その場合は解放後の状態を未確認として報告する
+ことがあります。
 
 ## 例
 

@@ -75,8 +75,8 @@ def _parser() -> argparse.ArgumentParser:
             "use pump explicitly or pass --pump to a supported mutation."
         ),
     )
-    parser.add_argument("--queue-dir", default=os.environ.get("HOME_MCP_RESOURCE_QUEUE_DIR", ".local/resource-queue"),
-                        help="queue ledger directory (default: .local/resource-queue)")
+    parser.add_argument("--queue-dir", default=os.environ.get("HOME_MCP_RESOURCE_QUEUE_DIR", ".runtime/resource-queue"),
+                        help="queue ledger directory (default: .runtime/resource-queue)")
     parser.add_argument("--runtime-dir", default=None,
                         help="Gateway jobs runtime directory (default: HOME_MCP_RUNTIME_DIR/.runtime)")
     sub = parser.add_subparsers(dest="command", required=True)

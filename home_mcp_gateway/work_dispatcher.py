@@ -1313,11 +1313,11 @@ class Dispatcher:
                 if job["run_id"] is None and seen.get("run_id") and seen["state"] not in ("unknown",):
                     self.conn.execute("UPDATE jobs SET run_id=? WHERE manifest_id=? AND job_id=?", (seen["run_id"], job["manifest_id"], job["job_id"]))
                 if seen["state"] == "succeeded":
-                    self.conn.execute("UPDATE jobs SET state='succeeded', obs_status='succeeded', obs_at=?, handoff_id=?, result_digest=?,"
+                    self.conn.execute("UPDATE jobs SET state='succeeded', obs_status='succeeded', maybe_executing=0, obs_at=?, handoff_id=?, result_digest=?,"
                                       " result_chars=?, completed_at=?, updated_at=? WHERE manifest_id=? AND job_id=?",
                                       (now, seen["handoff_id"], seen["digest"], seen["chars"], now, now, job["manifest_id"], job["job_id"]))
                 elif seen["state"] == "failed":
-                    self.conn.execute("UPDATE jobs SET state='failed', obs_status=?, obs_at=?, completed_at=?, updated_at=? WHERE manifest_id=? AND job_id=?",
+                    self.conn.execute("UPDATE jobs SET state='failed', obs_status=?, maybe_executing=0, obs_at=?, completed_at=?, updated_at=? WHERE manifest_id=? AND job_id=?",
                                       (seen["status"], now, now, now, job["manifest_id"], job["job_id"]))
                 else:
                     self.conn.execute("UPDATE jobs SET obs_status=?, obs_at=? WHERE manifest_id=? AND job_id=?",
@@ -1699,7 +1699,8 @@ def build_status(conn: sqlite3.Connection, now: float) -> dict[str, Any]:
                           "fully_verified_succeeded": all(j["state"] == "succeeded" for j in jobs),
                           "integrity_ok": hashlib.sha256(m["raw"]).hexdigest() == m["digest"],
                           "jobs": [{"job_id": j["job_id"], "state": j["state"], "session_id": j["session_id"], "run_id": j["run_id"],
-                                    "blocked_code": j["blocked_code"], "maybe_executing": bool(j["maybe_executing"]),
+                                    "blocked_code": j["blocked_code"],
+                                    "maybe_executing": bool(j["maybe_executing"] and j["state"] not in ("succeeded", "failed", "not_launched")),
                                     "observation": j["obs_status"], "handoff_id": j["handoff_id"], "result_digest": j["result_digest"],
                                     **({"route": j["route"]} if is_v2 else {}),
                                     **({"execution": {"gateway_job_id": execution_rows[j["job_id"]]["gateway_job_id"],

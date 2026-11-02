@@ -2,18 +2,21 @@ import json
 import asyncio
 import concurrent.futures
 import hashlib
+import io
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from contextlib import nullcontext
 from unittest.mock import patch
 import uuid
 
 import psutil
-from home_mcp_gateway import jobs
+from home_mcp_gateway import job_worker, jobs
 
 
 class JobTests(unittest.TestCase):
@@ -100,12 +103,96 @@ class JobTests(unittest.TestCase):
         self.assertIn("error", result)
 
     def test_job_environment_handoff(self):
-        job = jobs.job_start([sys.executable, "-c", "import os; print(os.environ['QA_CUSTOM_VALUE'])"],
-                             env={"QA_CUSTOM_VALUE": "日本語 value"}, runtime_dir=self.runtime)
+        code = (
+            "import json,os; print(json.dumps({"
+            "'explicit_present': bool(os.environ.get('QA_CUSTOM_VALUE')),"
+            "'dummy_key_present': 'DUMMY_API_KEY' in os.environ,"
+            "'path_present': bool(os.environ.get('PATH'))}))"
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "DUMMY_API_KEY": "unique-parent-key-sentinel",
+                "HOME_MCP_JOB_ENV_ALLOW": "DUMMY_API_KEY*",
+            },
+            clear=False,
+        ):
+            job = jobs.job_start(
+                [sys.executable, "-c", code],
+                env={"QA_CUSTOM_VALUE": "unique-explicit-env-sentinel"},
+                runtime_dir=self.runtime,
+            )
         self.ids.append(job["job_id"])
         self.assertEqual(jobs.job_wait(job["job_id"], 10, self.runtime)["exit_code"], 0)
-        self.assertIn("日本語 value", jobs.job_tail(job["job_id"], runtime_dir=self.runtime)["stdout"])
+        output = json.loads(jobs.job_tail(job["job_id"], runtime_dir=self.runtime)["stdout"])
+        self.assertTrue(output["explicit_present"])
+        self.assertFalse(output["dummy_key_present"])
+        self.assertTrue(output["path_present"])
         self.assertFalse((jobs._directory(job["job_id"], self.runtime) / "startup.env.dpapi").exists())
+        metadata_path = jobs._directory(job["job_id"], self.runtime) / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        self.assertEqual(metadata["env_policy"], "allowlist-v1")
+        self.assertGreater(metadata["env_inherited_count"], 0)
+        self.assertGreater(metadata["env_dropped_count"], 0)
+        self.assertIn("DUMMY_API_KEY", metadata["env_dropped_secret_like_names"])
+        serialized_metadata = metadata_path.read_text(encoding="utf-8")
+        self.assertNotIn("unique-parent-key-sentinel", serialized_metadata)
+        self.assertNotIn("unique-explicit-env-sentinel", serialized_metadata)
+        if os.name == "nt":
+            self.assertEqual(metadata["launch_method"], "windows_interactive_task")
+
+    def test_scheduler_environment_missing_fails_closed(self):
+        from home_mcp_gateway.windows_job_launch import consume_environment
+
+        directory = Path(self.runtime) / "scheduled-job"
+        directory.mkdir()
+        with patch.dict(
+            os.environ,
+            {"OPENAI_API_KEY": "unique-ambient-sentinel", "PATH": "ambient-path"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "^scheduler_environment_unavailable$"):
+                consume_environment(directory)
+            self.assertEqual(dict(os.environ), {})
+
+    def test_scheduler_worker_does_not_launch_when_environment_handoff_is_missing(self):
+        job_id = str(uuid.uuid4())
+        directory = jobs._directory(job_id, self.runtime)
+        directory.mkdir(parents=True)
+        jobs._save(directory / "metadata.json", {
+            "job_id": job_id,
+            "status": "starting",
+            "pid": None,
+            "process_create_time": None,
+            "worker_pid": None,
+            "worker_create_time": None,
+            "started_at": time.time(),
+            "finished_at": None,
+            "exit_code": None,
+            "command": [sys.executable, "-c", "print('must-not-run')"],
+            "cwd": self.runtime,
+            "stdout_path": str(directory / "stdout.log"),
+            "stderr_path": str(directory / "stderr.log"),
+            "worker_log_path": str(directory / "worker.log"),
+            "runtime_dir": self.runtime,
+            "scheduler_task": "HomeMCPJob-test-missing-env",
+        })
+        from home_mcp_gateway import job_worker
+
+        with (
+            patch.dict(os.environ, {"OPENAI_API_KEY": "unique-ambient-sentinel"}, clear=True),
+            patch("home_mcp_gateway.windows_job_launch.remove_task") as remove_task,
+            patch("home_mcp_gateway.job_worker.subprocess.Popen") as popen,
+            patch("home_mcp_gateway.job_worker._write_safe_traceback"),
+        ):
+            job_worker.main(directory)
+            self.assertEqual(dict(os.environ), {})
+        remove_task.assert_called_once_with("HomeMCPJob-test-missing-env")
+        popen.assert_not_called()
+        metadata = jobs._read(directory / "metadata.json")
+        self.assertEqual(metadata["status"], "failed")
+        self.assertTrue(metadata["scheduler_task_removed"])
+        self.assertEqual(metadata["error_detail"]["exception_type"], "RuntimeError")
 
     def test_job_backed_http_service_readiness(self):
         from home_mcp_gateway.readiness import wait_http, wait_tcp
@@ -143,19 +230,113 @@ class JobTests(unittest.TestCase):
         self.assertIsNone(result['exit_code'])
 
     def test_metadata_read_retries_transient_sharing_violation(self):
-        with patch.object(Path, 'read_text', side_effect=[PermissionError('sharing'), '{"status":"exited"}']) as read, \
+        with patch.object(jobs, "_open_metadata_read", side_effect=[
+                 PermissionError("sharing"), nullcontext(io.BytesIO(b'{"status":"exited"}'))
+             ]) as read, \
              patch.object(jobs.time, 'sleep') as sleep:
             self.assertEqual(jobs._read(Path('metadata.json'))['status'], 'exited')
         self.assertEqual(read.call_count, 2)
         sleep.assert_called_once_with(.025)
 
     def test_metadata_read_persistent_permission_error_is_not_hidden(self):
-        with patch.object(Path, 'read_text', side_effect=PermissionError('denied')) as read, \
+        with patch.object(jobs, "_open_metadata_read", side_effect=PermissionError("denied")) as read, \
              patch.object(jobs.time, 'sleep') as sleep:
             with self.assertRaises(PermissionError):
                 jobs._read(Path('metadata.json'))
         self.assertEqual(read.call_count, 20)
         self.assertEqual(sleep.call_count, 19)
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows file-sharing semantics")
+    def test_metadata_reader_allows_delete_access_while_its_handle_is_open(self):
+        import ctypes
+        from ctypes import wintypes
+
+        directory = Path(self.runtime) / "share-delete"
+        directory.mkdir()
+        target = directory / "metadata.json"
+        target.write_text('{"version":1}', encoding="utf-8")
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+        ]
+        create_file.restype = wintypes.HANDLE
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+
+        with jobs._open_metadata_read(target) as stream:
+            self.assertEqual(json.loads(stream.read().decode("utf-8")), {"version": 1})
+            delete_handle = create_file(
+                str(target), 0x00010000, 0x00000001 | 0x00000002 | 0x00000004,
+                None, 3, 0x00000080, None,
+            )
+            self.assertNotEqual(delete_handle, ctypes.c_void_p(-1).value,
+                                f"delete-share open failed: winerror={ctypes.get_last_error()}")
+            close_handle(delete_handle)
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows file-sharing semantics")
+    def test_metadata_save_retries_until_reader_releases_path(self):
+        directory = Path(self.runtime) / "transient-sharing"
+        directory.mkdir()
+        target = directory / "metadata.json"
+        target.write_text('{"version":1}', encoding="utf-8")
+        reader_opened = threading.Event()
+        release_reader = threading.Event()
+        reader_errors = []
+
+        def hold_metadata_open():
+            try:
+                with target.open("r", encoding="utf-8") as stream:
+                    json.load(stream)
+                    reader_opened.set()
+                    release_reader.wait(1.5)
+            except Exception as exc:
+                reader_errors.append(type(exc).__name__)
+
+        reader = threading.Thread(target=hold_metadata_open, daemon=True)
+        reader.start()
+        self.assertTrue(reader_opened.wait(2))
+        started = time.monotonic()
+        try:
+            jobs._save(target, {"version": 2})
+        finally:
+            release_reader.set()
+            reader.join(2)
+        elapsed = time.monotonic() - started
+        self.assertFalse(reader.is_alive())
+        self.assertEqual(reader_errors, [])
+        self.assertGreaterEqual(elapsed, 1.2)
+        self.assertLess(elapsed, 5)
+        self.assertEqual(jobs._read(target), {"version": 2})
+        self.assertEqual(list(directory.glob(".metadata.json.*.tmp")), [])
+
+    def test_metadata_save_expires_after_ten_second_deadline_and_removes_temp(self):
+        directory = Path(self.runtime) / "persistent-sharing"
+        directory.mkdir()
+        target = directory / "metadata.json"
+        now = [0.0]
+        sleeps = []
+
+        class SharingViolation(OSError):
+            def __init__(self):
+                super().__init__(5, "synthetic share conflict")
+                self.winerror = 32
+
+        def advance(seconds):
+            sleeps.append(seconds)
+            now[0] += seconds
+
+        with patch.object(Path, "replace", side_effect=SharingViolation()), \
+             patch.object(jobs.time, "monotonic", side_effect=lambda: now[0]), \
+             patch.object(jobs.time, "sleep", side_effect=advance):
+            with self.assertRaises(SharingViolation):
+                jobs._save(target, {"version": 1})
+
+        self.assertGreaterEqual(now[0], 10.0)
+        self.assertLessEqual(max(sleeps), .25)
+        self.assertAlmostEqual(sleeps[0], .025)
+        self.assertEqual(list(directory.iterdir()), [])
 
     def test_keyed_start_replays_same_reservation_and_conflicts_on_payload_change(self):
         command = [sys.executable, "-u", "-c", "print('only-once')"]
@@ -234,3 +415,157 @@ class JobTests(unittest.TestCase):
         self.assertEqual(first["status"], "exited")
         self.assertEqual(second["worker_pid"], first["worker_pid"])
         self.assertEqual((directory / "stdout.log").read_text().count("fenced"), 1)
+
+
+class WorkerFailureTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.runtime = self.temp.name
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def make_keyed_job(self):
+        job_id = str(uuid.uuid4())
+        directory = jobs._directory(job_id, self.runtime)
+        directory.mkdir(parents=True)
+        jobs._save(directory / "metadata.json", {
+            "job_id": job_id,
+            "idempotency_key": "wd2:worker-failure:" + "e" * 64,
+            "request_fingerprint": hashlib.sha256(b"fixture").hexdigest(),
+            "dispatcher_request_fingerprint": None,
+            "dispatcher_binding": None,
+            "launch_fence_state": "pending",
+            "command": ["safe-command-placeholder"],
+            "cwd": self.runtime,
+            "started_at": time.time(),
+            "finished_at": None,
+            "status": "starting",
+            "exit_code": None,
+            "pid": None,
+            "process_create_time": None,
+            "worker_pid": None,
+            "worker_create_time": None,
+            "stdout_path": str(directory / "stdout.log"),
+            "stderr_path": str(directory / "stderr.log"),
+            "worker_log_path": str(directory / "worker.log"),
+            "runtime_dir": self.runtime,
+        })
+        return job_id, directory
+
+    def test_two_concurrent_keyed_workers_popen_at_most_once(self):
+        _job_id, directory = self.make_keyed_job()
+        barrier = threading.Barrier(3)
+        errors = []
+
+        class FakeProc:
+            pid = 45678
+
+            def __init__(self):
+                self.poll_calls = 0
+
+            def poll(self):
+                self.poll_calls += 1
+                return None if self.poll_calls == 1 else 0
+
+            def wait(self):
+                return 0
+
+        proc = FakeProc()
+
+        def run_worker():
+            try:
+                barrier.wait(5)
+                job_worker.main(directory)
+            except BaseException as exc:
+                errors.append(type(exc).__name__)
+
+        workers = [threading.Thread(target=run_worker) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        with patch.object(job_worker.subprocess, "Popen", return_value=proc) as popen, \
+             patch.object(job_worker, "process_create_time", return_value=1.0):
+            barrier.wait(5)
+            for worker in workers:
+                worker.join(5)
+
+        self.assertFalse(any(worker.is_alive() for worker in workers))
+        self.assertEqual(errors, [])
+        popen.assert_called_once()
+        metadata = jobs._read(directory / "metadata.json")
+        self.assertEqual(metadata["status"], "exited")
+        self.assertTrue((directory / "worker.claim").exists())
+        self.assertTrue((directory / "launch.fence").exists())
+
+    def test_consumed_fence_save_failure_writes_sidecar_logs_safe_traceback_and_never_popens(self):
+        job_id, directory = self.make_keyed_job()
+        real_save = jobs._save
+        command_secret = "COMMAND_SECRET_CANARY"
+        env_secret = "ENV_SECRET_CANARY"
+
+        def fail_consumed_save(path, data):
+            if Path(path).name == "metadata.json" and data.get("launch_fence_state") == "consumed":
+                exc = PermissionError(13, f"blocked command={command_secret} env={env_secret}")
+                exc.winerror = 5
+                raise exc
+            real_save(path, data)
+
+        with patch.object(job_worker, "_save", side_effect=fail_consumed_save), \
+             patch.object(job_worker.subprocess, "Popen") as popen:
+            exit_code = job_worker._run_with_worker_log(directory)
+
+        self.assertEqual(exit_code, 1)
+        popen.assert_not_called()
+        self.assertTrue((directory / "worker.claim").is_file())
+        self.assertTrue((directory / "launch.fence").is_file())
+        self.assertEqual(list(directory.glob(".worker.failure.*.tmp")), [])
+        sidecar_text = (directory / "worker.failure.json").read_text(encoding="utf-8")
+        sidecar = json.loads(sidecar_text)
+        self.assertEqual(sidecar["stage"], "launch_fence_consumed_metadata_save")
+        self.assertEqual(sidecar["exception_type"], "PermissionError")
+        self.assertEqual(sidecar["errno"], 13)
+        self.assertEqual(sidecar["winerror"], 5)
+        self.assertTrue(sidecar["at_utc"].endswith("Z"))
+        self.assertEqual(sidecar["worker_pid"], os.getpid())
+        self.assertLessEqual(len(sidecar["message"]), 200)
+
+        worker_log = (directory / "worker.log").read_text(encoding="utf-8")
+        metadata_text = (directory / "metadata.json").read_text(encoding="utf-8")
+        for secret in (command_secret, env_secret):
+            self.assertNotIn(secret, sidecar_text)
+            self.assertNotIn(secret, worker_log)
+            self.assertNotIn(secret, metadata_text)
+        self.assertIn("Traceback (most recent call last):", worker_log)
+
+        with patch.object(jobs, "identity", return_value="missing"):
+            result = jobs.job_status(job_id, self.runtime)
+        self.assertEqual(result["status"], "unknown")
+        self.assertEqual(result["error_code"], "worker_metadata_save_failed")
+        self.assertEqual(result["error_detail"]["stage"], "launch_fence_consumed_metadata_save")
+        self.assertNotIn(command_secret, json.dumps(result))
+        self.assertNotIn(env_secret, json.dumps(result))
+
+    def test_keyed_execution_error_keeps_unknown_code_and_safe_error_detail(self):
+        job_id, directory = self.make_keyed_job()
+        command_secret = "POpen_COMMAND_SECRET"
+        env_secret = "POpen_ENV_SECRET"
+        exc = OSError(13, f"cannot execute command={command_secret} env={env_secret}")
+        exc.winerror = 5
+        with patch.object(job_worker.subprocess, "Popen", side_effect=exc) as popen:
+            exit_code = job_worker._run_with_worker_log(directory)
+
+        self.assertEqual(exit_code, 0)  # keyed outcome is persisted as unknown
+        popen.assert_called_once()
+        metadata_text = (directory / "metadata.json").read_text(encoding="utf-8")
+        metadata = json.loads(metadata_text)
+        self.assertEqual(metadata["status"], "unknown")
+        self.assertEqual(metadata["error_code"], "worker_execution_unknown")
+        self.assertEqual(metadata["error_detail"]["exception_type"], "PermissionError")
+        self.assertEqual(metadata["error_detail"]["errno"], 13)
+        self.assertEqual(metadata["error_detail"]["winerror"], 5)
+        worker_log = (directory / "worker.log").read_text(encoding="utf-8")
+        for secret in (command_secret, env_secret):
+            self.assertNotIn(secret, metadata_text)
+            self.assertNotIn(secret, worker_log)
+        self.assertIn("Traceback (most recent call last):", worker_log)
+        self.assertFalse((directory / "worker.failure.json").exists())

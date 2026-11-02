@@ -17,13 +17,13 @@ class JobSteerSchemaTests(unittest.IsolatedAsyncioTestCase):
         register_tools(self.server, jobs.TOOLS)
         self.arguments = {
             "job_steer": {
-                "job_id": "88888888-8888-4888-8888-888888888888",
+                "job_id": "e94b3b5a-f396-4b51-a064-420d90938257",
                 "expected_turn_id": "turn-1",
                 "text": "Please clarify this step",
                 "idempotency_key": "steer-key",
             },
             "job_steer_status": {
-                "job_id": "88888888-8888-4888-8888-888888888888",
+                "job_id": "e94b3b5a-f396-4b51-a064-420d90938257",
                 "idempotency_key": "steer-key",
             },
         }
@@ -99,10 +99,10 @@ class JobSteerSchemaTests(unittest.IsolatedAsyncioTestCase):
         invoke = Mock(return_value={"ok": True})
         tool.fn = invoke
         result = await self.server.call_tool("job_status", {
-            "job_id": "88888888-8888-4888-8888-888888888888", "legacy_extra": True,
+            "job_id": "e94b3b5a-f396-4b51-a064-420d90938257", "legacy_extra": True,
         })
         self.assertFalse(result.is_error)
-        invoke.assert_called_once_with(job_id="88888888-8888-4888-8888-888888888888", runtime_dir=None)
+        invoke.assert_called_once_with(job_id="e94b3b5a-f396-4b51-a064-420d90938257", runtime_dir=None)
 
 
 if __name__ == "__main__":

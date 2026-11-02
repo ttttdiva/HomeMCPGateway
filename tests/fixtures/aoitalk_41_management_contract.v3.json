@@ -3523,7 +3523,7 @@
   },
   "schema_version": "80.41-management-contract.v3",
   "source": {
-    "absolute_root": "C:\\path\\to\\AoiTalk",
+    "absolute_root": "D:\\Dev\\41_AoiTalk",
     "commit": "b6571a8623d08b2323fce64b8d8a8cd318410c64",
     "contract_files": [
       "src/api/docs_routes.py",

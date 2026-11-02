@@ -24,7 +24,7 @@ from home_mcp_gateway import resource_queue_claude as claude
 from home_mcp_gateway import resource_queue_gateway as gateway
 
 
-OLD_THREAD = "77777777-7777-4777-8777-777777777777"
+OLD_THREAD = "01a1694d-91d9-74e2-8e98-bf8b694b9ada"
 SESSION = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 MODEL = "claude-sonnet-5-5"
 EFFORT = "xhigh"
@@ -927,6 +927,26 @@ class ClaudeHelperTests(unittest.TestCase):
         self.assertEqual((wildcard["state"], wildcard["code"]), ("result_pending", "invalid_allowed_tool"))
 
 
+class PrivateQaTaskFilesTests(unittest.TestCase):
+    """The prepared (never executed here) phone QA candidates under the private .local tree."""
+
+    ROOT = Path(__file__).resolve().parents[1] / ".runtime" / "resource-queue" / "tasks"
+
+    def test_prepared_candidates_validate_against_the_builder_and_the_script(self):
+        tools_file, script = self.ROOT / "qa293-allowed-tools.json", self.ROOT / "qa293_phone.py"
+        if not (tools_file.is_file() and script.is_file()):
+            self.skipTest("private QA task files are not prepared on this machine")
+        tools = json.loads(tools_file.read_text(encoding="utf-8"))
+        self.assertEqual(claude.normalize_allowed_tools(tools), tools)
+        source = script.read_text(encoding="utf-8")
+        tree = ast.parse(source, str(script))
+        commands = next(ast.literal_eval(node.value) for node in tree.body
+                        if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "COMMANDS" for t in node.targets))
+        self.assertEqual(sorted(spec.rsplit(" ", 1)[1][:-1] for spec in tools), sorted(commands))
+        for spec in tools:
+            self.assertIn(script.as_posix().casefold(), spec.casefold())
+        for forbidden in ("uninstall", "pm clear", "force-stop", "pm grant", "pm revoke", "wipe", "reboot", "shell=True", "os.system"):
+            self.assertNotIn(forbidden, source)
 
 
 if __name__ == "__main__":

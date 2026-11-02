@@ -1,0 +1,42 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Owned-tab viewport fixture</title>
+<style>
+  html, body { margin: 0; padding: 0; }
+  #viewport-probe { width: 100vw; height: 48px; background: #4b78b8; }
+  #dpr-probe { width: 60px; height: 18px; background: #8e5aaf; }
+  @media (min-resolution: 1.49dppx) and (max-resolution: 1.51dppx) { #dpr-probe { width: 150px; } }
+  @media (min-resolution: 2dppx) { #dpr-probe { width: 200px; } }
+  #far-source, #far-target { position: fixed; top: 180px; width: 44px; height: 44px; }
+  #far-source { left: 400px; background: #bb493d; }
+  #far-target { left: 460px; background: #4c9c58; }
+  #drop-result { position: fixed; left: 0; top: 240px; }
+</style>
+<div id="viewport-probe"></div>
+<div id="dpr-probe"></div>
+<div id="far-source"></div>
+<div id="far-target"></div>
+<output id="drop-result">waiting</output>
+<script>
+  const source = document.querySelector('#far-source');
+  const target = document.querySelector('#far-target');
+  let active = false;
+  let over = false;
+  source.addEventListener('pointerdown', event => {
+    if (event.button === 0) {
+      active = true;
+      source.setPointerCapture(event.pointerId);
+    }
+  });
+  document.addEventListener('pointermove', event => {
+    if (!active) return;
+    const box = target.getBoundingClientRect();
+    over = event.clientX >= box.left && event.clientX <= box.right &&
+      event.clientY >= box.top && event.clientY <= box.bottom;
+  });
+  document.addEventListener('pointerup', () => {
+    if (active && over) document.querySelector('#drop-result').textContent = 'drop-ok';
+    active = false;
+    over = false;
+  });
+</script>

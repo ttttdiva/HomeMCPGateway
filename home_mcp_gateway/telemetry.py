@@ -10,6 +10,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import threading
 import time
 from typing import Any, Callable, get_type_hints
@@ -101,6 +102,42 @@ def _summarize_result(result: Any) -> dict[str, Any]:
                     summary[key] = value
         return summary
     return {"type": type(result).__name__}
+
+
+_ERROR_CODE_PATTERN = re.compile(
+    r"^(?:[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception):\s+)?([a-z][a-z0-9_]{2,63})"
+)
+# Fixed sentences produced by browser_agent.safe_exception_summary; anything
+# else (free text, URLs, values) is never copied into the tool log.
+_FIXED_ERROR_SUMMARY_PATTERN = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception): "
+    r"(Timed out waiting for [a-z ,]{3,80}\."
+    r"|Element [a-z ]{3,60}\."
+    r"|Target resolution was ambiguous\."
+    r"|Navigation started a download\."
+    r"|Navigation failed with net::ERR_[A-Z0-9_]{3,60}\."
+    r"|Browser operation failed; raw details omitted\.)$"
+)
+
+
+def _error_diagnostics(error: BaseException) -> dict[str, str]:
+    """Identifier-only diagnostics for a failed tool call.
+
+    The MCP boundary wraps failures as ``ToolError("<Type>: <message>")``, so the
+    leading type name is skipped. ``browser_action_failed`` carries a fixed
+    Playwright stage sentence, which is kept verbatim only when it matches the
+    fixed vocabulary.
+    """
+    text = str(error or "")
+    match = _ERROR_CODE_PATTERN.match(text)
+    if match is None:
+        return {}
+    diagnostics = {"error_code": match.group(1)}
+    if match.group(1) == "browser_action_failed":
+        detail = _FIXED_ERROR_SUMMARY_PATTERN.match(text[match.end():].lstrip(": ").strip())
+        if detail is not None:
+            diagnostics["error_summary"] = detail.group(0)[:200]
+    return diagnostics
 
 
 def _append_event(event: dict[str, Any]) -> None:
@@ -237,6 +274,7 @@ def instrument_tool(target: Callable[..., Any]) -> Callable[..., Any]:
         }
         if error is not None:
             event["error_type"] = type(error).__name__
+            event.update(_error_diagnostics(error))
         else:
             event["result"] = _summarize_result(result)
         _append_event(event)

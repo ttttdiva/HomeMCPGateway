@@ -635,8 +635,11 @@ def local_read_plan(
         if remaining <= 0:
             output.update({"ok": False, "status": "timed_out", "failed_step": index, "reason": "total_timeout"})
             break
-        budget = min(step_timeout, remaining)
-        budget_limited_by_total = remaining < step_timeout
+        # Subtracting two monotonic floats can leave `remaining` a few ulps
+        # above the original total budget. Keep every delegated timeout within
+        # the validated caller budget as well as the current deadline.
+        budget = min(step_timeout, total_timeout, remaining)
+        budget_limited_by_total = min(total_timeout, remaining) < step_timeout
         step_started = time.monotonic()
         entry: dict[str, Any] = {"index": index, "operation": operation, "status": "completed"}
         try:

@@ -77,12 +77,26 @@ def launch(directory: Path, environment: dict, metadata: dict) -> None:
 
 def consume_environment(directory: Path) -> None:
     import os
-    import win32crypt
     path = directory / "startup.env.dpapi"
-    if path.exists():
+    try:
+        encrypted = path.read_bytes()
+        import win32crypt
+
+        environment = json.loads(win32crypt.CryptUnprotectData(encrypted, None, None, None, 0)[1])
+        if not isinstance(environment, dict) or any(
+            not isinstance(name, str) or not isinstance(value, str)
+            for name, value in environment.items()
+        ):
+            raise ValueError("invalid scheduler environment")
+    except Exception:
+        # A scheduled worker must never fall back to the interactive user's
+        # ambient environment if the protected handoff is absent or unreadable.
+        os.environ.clear()
+        raise RuntimeError("scheduler_environment_unavailable") from None
+    finally:
         try:
-            environment = json.loads(win32crypt.CryptUnprotectData(path.read_bytes(), None, None, None, 0)[1])
-            os.environ.clear()
-            os.environ.update(environment)
-        finally:
             path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    os.environ.clear()
+    os.environ.update(environment)

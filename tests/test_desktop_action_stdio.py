@@ -27,6 +27,11 @@ class DesktopActionStdioTests(unittest.TestCase):
                         tool = next(t for t in listing.tools if t.name == "desktop_act")
                         for key in ("target_guard_ref", "observe_after", "observe_with_uia"):
                             self.assertIn(key, tool.input_schema["properties"])
+                        hold_tool = next(t for t in listing.tools if t.name == "desktop_hold_keys")
+                        for key in ("observation_id", "hwnd", "expected_pid", "expected_process_create_time",
+                                    "keys", "duration_ms"):
+                            self.assertIn(key, hold_tool.input_schema["properties"])
+                            self.assertIn(key, hold_tool.input_schema["required"])
                         for observe_after in (False, True):
                             result = await session.call_tool("desktop_act", {
                                 "action": "text", "hwnd": 123, "text": "fixture 日本語😀",
@@ -43,6 +48,20 @@ class DesktopActionStdioTests(unittest.TestCase):
                                 self.assertIn("observation_after", data)
                                 with Image.open(io.BytesIO(base64.b64decode(images[0].data))) as image:
                                     self.assertEqual(image.size, (64, 48))
+
+                        observed = await session.call_tool("desktop_observe", {"mode": "window", "hwnd": 123})
+                        self.assertFalse(observed.is_error, observed)
+                        target = observed.structured_content["window"]
+                        held = await session.call_tool("desktop_hold_keys", {
+                            "observation_id": observed.structured_content["observation_id"],
+                            "hwnd": target["hwnd"], "expected_pid": target["pid"],
+                            "expected_process_create_time": target["process_create_time"],
+                            "keys": ["shift", "w"], "duration_ms": 100,
+                        })
+                        self.assertFalse(held.is_error, held)
+                        self.assertEqual(held.structured_content["status"], "completed")
+                        self.assertTrue(held.structured_content["release"]["verified"])
+                        self.assertEqual(held.structured_content["verification"]["status"], "unknown")
         anyio.run(check)
 
     @unittest.skipUnless(os.environ.get("HOME_MCP_ACTION_FIXTURE_DIR"),

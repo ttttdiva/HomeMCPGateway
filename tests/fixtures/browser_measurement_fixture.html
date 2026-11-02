@@ -1,0 +1,42 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Read-only browser measurement fixture</title>
+<style>
+  body { margin: 12px; font: 14px sans-serif; background: #f4f4f4; }
+  .tile { width: 150px; height: 72px; margin: 8px; display: inline-block; background: #202020; }
+  #blink { background: #ff00ff; outline: 4px solid #fff; forced-color-adjust: none; animation: blink 1100ms steps(1, end) infinite; }
+  @keyframes blink { 0%, 49% { visibility: visible; } 50%, 100% { visibility: hidden; } }
+  #jitter { background: #355e9b; animation: jitter 1300ms linear infinite; }
+  @keyframes jitter { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(12px); } }
+  #stable { background: #287440; }
+  .drag { width: 125px; height: 52px; margin: 12px; padding: 8px; background: #c9c9c9; display: inline-block; }
+</style>
+<div id="blink" class="tile"></div>
+<div id="jitter" class="tile"></div>
+<div id="stable" class="tile"></div>
+<div id="drag-source" class="drag">drag source</div>
+<div id="drop-target" class="drag">drop target</div>
+<output id="drag-result">waiting</output>
+<script>
+  const source = document.querySelector('#drag-source');
+  const target = document.querySelector('#drop-target');
+  let active = false;
+  let over = false;
+  source.addEventListener('pointerdown', event => {
+    if (event.button === 0) {
+      active = true;
+      source.setPointerCapture(event.pointerId);
+    }
+  });
+  document.addEventListener('pointermove', event => {
+    if (!active) return;
+    const box = target.getBoundingClientRect();
+    over = event.clientX >= box.left && event.clientX <= box.right &&
+      event.clientY >= box.top && event.clientY <= box.bottom;
+  });
+  document.addEventListener('pointerup', () => {
+    if (active && over) document.querySelector('#drag-result').textContent = 'drop-ok';
+    active = false;
+    over = false;
+  });
+</script>

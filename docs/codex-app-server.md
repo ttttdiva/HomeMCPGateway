@@ -38,7 +38,7 @@ The dispatcher derives and pins the complete `app_server` spec in its immutable
   "model_provider": "openai",
   "effort": "high",
   "input_text": "Synthetic input: inspect this repository without changing any files.",
-  "cwd": "C:\\path\\to\\HomeMCPGateway",
+  "cwd": "D:\\Dev\\80_HomeMCPGateway",
   "sandbox": "read-only",
   "approval_policy": "never",
   "approvals_reviewer": "user"
@@ -61,11 +61,11 @@ guard:
 ```json
 {
   "command": ["C:\\ROOT_SELECTED_INSTALL\\node.exe", "C:\\ROOT_SELECTED_INSTALL\\node_modules\\@openai\\codex\\bin\\codex.js", "app-server"],
-  "cwd": "C:\\path\\to\\HomeMCPGateway",
+  "cwd": "D:\\Dev\\80_HomeMCPGateway",
   "idempotency_key": "wd2:codex_start:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "request_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "dispatcher_binding": {
-    "db_path": "C:\\path\\to\\HomeMCPGateway\\.local\\work-dispatcher\\state.sqlite3",
+    "db_path": "D:\\Dev\\80_HomeMCPGateway\\.local\\work-dispatcher\\state.sqlite3",
     "manifest_id": "synthetic-steer-manifest",
     "manifest_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "root_source_id": "synthetic-root",
@@ -83,7 +83,7 @@ guard:
     "model_provider": "openai",
     "effort": "high",
     "input_text": "Synthetic input: inspect this repository without changing any files.",
-    "cwd": "C:\\path\\to\\HomeMCPGateway",
+    "cwd": "D:\\Dev\\80_HomeMCPGateway",
     "sandbox": "read-only",
     "approval_policy": "never",
     "approvals_reviewer": "user"

@@ -77,6 +77,9 @@ def configure(user):
         ("BringWindowToTop", [w.HWND], w.BOOL),
         ("AttachThreadInput", [U32, U32, w.BOOL], w.BOOL),
         ("GetCursorPos", [c.POINTER(w.POINT)], w.BOOL),
+        # The held-key game QA action checks only the high bit (currently down)
+        # before injecting input and after releasing its own key events.
+        ("GetAsyncKeyState", [U32], c.c_int16),
     ):
         fn = getattr(user, name)
         fn.argtypes, fn.restype = args, result
@@ -142,11 +145,13 @@ def _integrity(pid: int) -> int | None:
         return None
 
 
-def send(user, events: list[INPUT], hwnd: int | None = None) -> int:
+def send(user, events: list[INPUT], hwnd: int | None = None, *, require_foreground: bool = False) -> int:
     if not events:
         return 0
     c.set_last_error(0)
     array = (INPUT * len(events))(*events)
+    if require_foreground and (not hwnd or user.GetForegroundWindow() != hwnd):
+        raise RuntimeError("Target lost foreground before SendInput; no key-down event was inserted")
     sent = user.SendInput(len(events), array, c.sizeof(INPUT))
     error = c.get_last_error()
     if sent != len(events):

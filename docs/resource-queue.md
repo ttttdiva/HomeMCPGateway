@@ -18,7 +18,7 @@ actor の startup envelope は、現在の `current_operation_id`、`current_act
 
 ## queue の保存と pump
 
-queue の SQLite は `.local/resource-queue/state.sqlite3` に置き、同じディレクトリの `resource_queue.lock` を OS singleton に使う。Gateway job の実体と stdout/stderr は既存の `.runtime/jobs/` を使う。SQLite は WAL、`synchronous=FULL` とし、intent・claim・lease の競合を `BEGIN IMMEDIATE` で直列化する。pump はプロセス間 OS singleton を取得してからこの transaction を行うため、二つの pump が同じ resource を同時に claim しない。singleton は物理 device を止める仕組みではなく、queue controller の同時実行を一つにする仕組みである。
+queue の SQLite は `.runtime/resource-queue/state.sqlite3` に置き、同じディレクトリの `resource_queue.lock` を OS singleton に使う。Gateway job の実体と stdout/stderr は既存の `.runtime/jobs/` を使う。SQLite は WAL、`synchronous=FULL` とし、intent・claim・lease の競合を `BEGIN IMMEDIATE` で直列化する。pump はプロセス間 OS singleton を取得してからこの transaction を行うため、二つの pump が同じ resource を同時に claim しない。singleton は物理 device を止める仕組みではなく、queue controller の同時実行を一つにする仕組みである。
 
 これは常駐 daemon や event receiver ではない。idle 中の token polling は行わず、root または明示的な手動 caller が次の境界で `Controller.pump()` を呼ぶ。queue の core API は `Queue(directory)`、`register_resource(...)`、`enqueue(...)`、`review(...)`、`cancel(...)`、`heartbeat(...)`、`status(...)`、`receipts(...)` と `Controller(queue, runner, lease_seconds, owner).pump()` / `.reconcile()` である。実装が確定した CLI がある場合も、これらの API の transaction 境界を迂回して runner を直接呼んではならない。
 
@@ -58,7 +58,7 @@ root/operator は dispatch 前に、review 済みの入力、procedure、payload
 
 固定キーの Gateway job は既存の `home_mcp_gateway/jobs.py` の契約を再利用する。`stable_job_id` は exact idempotency key から UUID を導き（`jobs.py:51`）、explicit environment の digest は別に固定される（`jobs.py:91`）。`job_start` は `idempotency_key`、request fingerprint、cwd などを検証し（`jobs.py:236`）、同じ key の予約ディレクトリを `.runtime/jobs` で再発見する（`jobs.py:277` 以降）。queue はこの reservation/job metadata と receipts を照合し、thread の生存やタイトルだけを根拠にしない。
 
-* Codex は PATH 上の native `codex.exe` を使います。`.cmd` wrapper ではなく native executable を指定してください。
+Windows の既存 job 起動は、worker を独立させるための hidden な one-shot interactive Task Scheduler bootstrap を使う。`windows_job_launch.py` の登録は recurring trigger や常駐 daemon の追加ではなく、worker が開始時に task を削除する既存 startup contract である。`job_worker.py` の非対話 child も Windows では `CREATE_NO_WINDOW` で起動する。resource queue のために新しい常駐 task やログオン receiver を登録しない。Codex route の request は、インストール済み CLI の `codex exec resume --help` で確認した source/help 契約に合わせて `build_codex_resume_command` / `GatewayRunner.prepare_codex_resume` が argv を固定し、`GatewayRunner.reconcile` が job metadata の key・command・cwd・environment digest・request fingerprint を再確認する。直接 argv に渡す executable は `.ps1` wrapper ではなく native `codex.exe` に固定する（この PC では `<codex-install-root>\vendor\x86_64-pc-windows-msvc\bin\codex.exe` の存在を確認済み）。`Get-Command codex` が返す `codex.ps1` は直接 executable binding に使わない。help の確認は command shape の evidence であり、実際の推論、モデル応答、外部サービス接続の成功を意味しない。
 
 既存の有限 `work_dispatcher` は別の queue/ledger であり、変更しない。この resource queue は `work_dispatcher` の `max_concurrency`、Claude/Codex の finite manifest、uncertain retry budget、dependency release の制限を暗黙に継承しない。両方が同じリソースを使う場合の優先順位と handover は root が明示的に決める。
 
@@ -93,7 +93,7 @@ device evidence は準備済み actor が取得・申告した attestation で�
 
 ## one-shot CLI
 
-実装済みの one-shot CLI は `python scripts/resource_queue.py` で起動する（module entry point は同じ `home_mcp_gateway.resource_queue_cli.main`）。これは `register`、`enqueue`、`review`、`priority`、`cancel`、`heartbeat`、`release`（`release-receipt` alias）、`receipt`（`receipts` alias）、`status`、`pump` だけを提供し、daemon/watch mode は持たない。`--queue-dir` の既定値は `.local/resource-queue`、`--runtime-dir` の既定値は既存の Gateway runtime 設定である。release は controller の OS lock 内で Gateway verifier による receipt/job/process/device evidence の検証、lease binding 照合、ledger finalize を行う。ledger の自己申告だけで release を通す bypass はない。以下の例は実際の subcommand help と source に合わせた review 用の形で、`@...` のファイルと `<...>` の値は root が準備した実値に置き換える。
+実装済みの one-shot CLI は `python scripts/resource_queue.py` で起動する（module entry point は同じ `home_mcp_gateway.resource_queue_cli.main`）。これは `register`、`enqueue`、`review`、`priority`、`cancel`、`heartbeat`、`release`（`release-receipt` alias）、`receipt`（`receipts` alias）、`status`、`pump` だけを提供し、daemon/watch mode は持たない。`--queue-dir` の既定値は `.runtime/resource-queue`、`--runtime-dir` の既定値は既存の Gateway runtime 設定である。release は controller の OS lock 内で Gateway verifier による receipt/job/process/device evidence の検証、lease binding 照合、ledger finalize を行う。ledger の自己申告だけで release を通す bypass はない。以下の例は実際の subcommand help と source に合わせた review 用の形で、`@...` のファイルと `<...>` の値は root が準備した実値に置き換える。
 
 ```powershell
 python scripts/resource_queue.py --help

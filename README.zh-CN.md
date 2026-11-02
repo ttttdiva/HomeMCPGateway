@@ -84,10 +84,10 @@ Home MCP Gateway 通过 OpenAI Secure MCP Tunnel，把 Windows PC 上运行的�
 
 现有profile通过 `env:CONTROL_PLANE_API_KEY` 引用认证信息。`run` 不会加载仓库的 `.env`，而 `connect_tunnel.ps1` 会在结束时恢复调用方环境。以下代码按现有脚本的方式将 `.env` 作为纯文本加载，不显示秘密值，不将其写入命令参数，并在退出时恢复环境：
 
-请在新打开的PowerShell本身中指定安装目录。请将下面的路径改为实际绝对路径。
+请在新打开的PowerShell本身中指定安装目录。以下是本机的路径示例；如安装位置不同，请将 `$GatewayRoot` 那一行改为实际绝对路径。
 
 ```powershell
-$GatewayRoot = 'C:\path\to\HomeMCPGateway'
+$GatewayRoot = 'D:\Dev\80_HomeMCPGateway'
 Set-Location -LiteralPath $GatewayRoot
 if (-not (Test-Path -LiteralPath (Join-Path $GatewayRoot '.env') -PathType Leaf)) { throw 'Gateway .env not found.' }
 $GatewaySavedEnv = @{}
@@ -127,10 +127,10 @@ try {
 
 ### 隐藏的后台运行
 
-如果不需要隧道本体的可见控制台，且已配置自动启动，可使用现有的 `Home MCP Gateway` 计划任务。在任务计划程序中选择“运行”，或执行：
+如果不需要隧道本体的可见控制台，且已配置自动启动，可使用现有的 `80_HomeMCPGateway - ChatGPT` 计划任务。在任务计划程序中选择“运行”，或执行：
 
 ```powershell
-Start-ScheduledTask -TaskName 'Home MCP Gateway'
+Start-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
 ```
 
 任务的默认操作为 `powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "<repository>\scripts\connect_tunnel.ps1" -Watch`。它在隐藏窗口中每30秒检查一次，并在异常时重连。仅在任务尚未注册时，从仓库根目录执行以下命令；注册后会立即启动任务：
@@ -142,7 +142,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install_autostart.
 | 入口 | 行为与显示 |
 | --- | --- |
 | `tunnel-client.exe run --profile-dir ... --profile home-mcp --log.file=` | 在当前控制台前台运行隧道本体；需按上文加载环境 |
-| 现有 `Home MCP Gateway` 任务 | 在隐藏窗口中持续执行 `connect_tunnel.ps1 -Watch` |
+| 现有 `80_HomeMCPGateway - ChatGPT` 任务 | 在隐藏窗口中持续执行 `connect_tunnel.ps1 -Watch` |
 | `.\scripts\connect_tunnel.ps1` | 以process mode连接、检查状态后返回提示符；runtime继续运行 |
 | `.\scripts\connect_tunnel.ps1 -Watch` | 在当前窗口持续执行监视程序；本体是单独管理的进程 |
 | `.\scripts\run_gateway.cmd` | 启动stdio Gateway本体；不会连接隧道或打开管理页面 |
@@ -163,9 +163,9 @@ if (-not $TunnelClient) { throw '请将已解压的tunnel-client.exe完整路径
 **修改 `.env` 或Gateway代码后，需要先停止再启动runtime；仅重新执行连接命令不够。** 使用计划任务时，先停止监视，再按以下顺序操作（使用上文已确认的可执行文件）：
 
 ```powershell
-Stop-ScheduledTask -TaskName 'Home MCP Gateway'
+Stop-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
 & $TunnelClient runtimes stop home-mcp
-Start-ScheduledTask -TaskName 'Home MCP Gateway'
+Start-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
 ```
 
 启动是异步的。确认三个状态字段均变为True后，再刷新ChatGPT连接元数据。手动Watch模式下，应先结束监视、停止runtime，再执行 `.\scripts\connect_tunnel.ps1 -Watch`。如已修改 `TUNNEL_ALIAS`，请将示例中的 `home-mcp` 替换为实际alias。
@@ -173,8 +173,8 @@ Start-ScheduledTask -TaskName 'Home MCP Gateway'
 如需同时禁用自动启动，先禁用并停止任务，再停止runtime。恢复时重新启用并运行任务：
 
 ```powershell
-Disable-ScheduledTask -TaskName 'Home MCP Gateway'
-Stop-ScheduledTask -TaskName 'Home MCP Gateway'
+Disable-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
+Stop-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
 & $TunnelClient runtimes stop home-mcp
 ```
 

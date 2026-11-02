@@ -13,7 +13,9 @@ from home_mcp_gateway import browser_agent, browser_qa, decision_receipt, jev as
 from home_mcp_gateway.browser_agent import (
     BrowserAgentError,
     _jev_safe_url,
+    _click_failure_code,
     execute_browser_plan,
+    safe_exception_summary,
     validate_steps,
 )
 from home_mcp_gateway.jev import (
@@ -31,6 +33,102 @@ from home_mcp_gateway.decision_receipt import (
     summarize_decision_receipts,
 )
 from qa_test_support import local_server
+
+
+class BrowserExceptionDiagnosticTests(unittest.TestCase):
+    def test_multiline_playwright_timeout_ignores_disabled_class_markup(self):
+        exc = RuntimeError(
+            "Timeout 3000ms exceeded.\nCall log:\n"
+            "  - waiting for locator(\"button\").nth(0)\n"
+            "  - locator resolved to <button class=\"disabled:pointer-events-none\">Save</button>\n"
+            "  - waiting for element to be visible, enabled and stable"
+        )
+        summary = safe_exception_summary(exc)
+        self.assertEqual(
+            summary["message"],
+            "Timed out waiting for the element to be visible, enabled and stable.",
+        )
+        self.assertNotIn("not actionable", summary["message"])
+        self.assertNotIn("disabled:pointer-events-none", summary["message"])
+        self.assertEqual(_click_failure_code(exc), "browser_element_unstable")
+
+    def test_playwright_actionability_lines_keep_their_safe_categories(self):
+        cases = (
+            ("<div>intercepts pointer events</div>", "browser_element_obscured", "obstructed"),
+            ("element is outside of the viewport", "browser_element_not_visible", "not visible"),
+            ("element is not enabled", "browser_element_not_actionable", "not actionable"),
+        )
+        for line, code, phrase in cases:
+            with self.subTest(line=line):
+                exc = RuntimeError(f"locator.click failed\nCall log:\n  - {line}")
+                self.assertEqual(_click_failure_code(exc), code)
+                self.assertIn(phrase, safe_exception_summary(exc)["message"])
+
+    def test_exception_summary_never_returns_raw_secrets_or_urls(self):
+        summary = safe_exception_summary(RuntimeError(
+            "failed https://user:pass@example.test/path?token=canary#fragment "
+            "cookie=session-secret"
+        ))
+        self.assertEqual(summary["message"], "Browser operation failed; raw details omitted.")
+        for private in (
+            "user", "pass", "example.test", "canary", "fragment", "session-secret", "cookie",
+        ):
+            self.assertNotIn(private, json.dumps(summary))
+
+
+class BrowserAgentVisibilityActionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_click_fill_and_type_foreground_owned_attached_page(self):
+        for action in ("click", "fill", "type"):
+            with self.subTest(action=action):
+                element = SimpleNamespace(
+                    scroll_into_view_if_needed=mock.AsyncMock(),
+                    click=mock.AsyncMock(),
+                    fill=mock.AsyncMock(),
+                    dispose=mock.AsyncMock(),
+                )
+                handle = SimpleNamespace(as_element=lambda: element, dispose=mock.AsyncMock())
+                frame = SimpleNamespace(evaluate_handle=mock.AsyncMock(return_value=handle))
+
+                class Page:
+                    url = "http://127.0.0.1:3002/fixture"
+
+                    def __init__(self):
+                        self.visibility_state = "hidden"
+                        self.bring_to_front_calls = 0
+                        self.context = SimpleNamespace(pages=[self])
+
+                    async def evaluate(self, script):
+                        if script != "document.visibilityState":
+                            raise AssertionError("only the fixed visibility probe is allowed")
+                        return self.visibility_state
+
+                    async def bring_to_front(self):
+                        self.bring_to_front_calls += 1
+                        self.visibility_state = "visible"
+
+                page = Page()
+                handle_id = "edge_" + "a" * 24
+                session = {
+                    "page": page,
+                    "context": page.context,
+                    "attached": True,
+                    "selected_tab_handle": handle_id,
+                    "owned_tab_handles": {handle_id},
+                    "owned_tab_pages": {handle_id: page},
+                }
+                step = browser_agent.BrowserStep(action=action, instruction="target", value="fixture")
+                await browser_agent._act_on_target(
+                    session,
+                    browser_agent.CandidateTarget(frame, "target-1", {}),
+                    step,
+                    action_timeout_seconds=1,
+                )
+                self.assertEqual(page.bring_to_front_calls, 1)
+                self.assertEqual(session["_last_tab_visibility_diagnostic"]["initial_state"], "hidden")
+                if action == "click":
+                    element.click.assert_awaited_once_with(timeout=1000)
+                else:
+                    element.fill.assert_awaited_once_with("fixture", timeout=1000)
 
 
 class FakeJev:
@@ -216,6 +314,123 @@ class BrowserPlanValidationTests(unittest.TestCase):
         )
         self.assertIn(browser_qa.browser_run_plan, browser_qa.TOOLS)
 
+    def test_plan_filters_validate_only_for_element_steps(self):
+        step, = validate_steps([{
+            "action": "fill", "instruction": "Message", "value": "fixture",
+            "within": "Chat composer", "test_id": "chat-composer", "nth": 0,
+        }])
+        self.assertEqual((step.within, step.test_id, step.nth), ("Chat composer", "chat-composer", 0))
+        for invalid in (
+            {"action": "fill", "instruction": "Message", "value": "x", "nth": -1},
+            {"action": "fill", "instruction": "Message", "value": "x", "nth": True},
+            {"action": "wait", "value": "0", "test_id": "chat-composer"},
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(BrowserAgentError):
+                validate_steps([invalid])
+
+    def test_direct_locator_filters_compose_and_default_locator_is_unchanged(self):
+        page = mock.Mock()
+        base = mock.Mock()
+        page.locator.return_value = base
+        scope = mock.Mock()
+        page.get_by_role.return_value = scope
+        in_scope = mock.Mock()
+        scope.locator.return_value = in_scope
+        test_id_locator = mock.Mock()
+        page.get_by_test_id.return_value = test_id_locator
+        intersected = mock.Mock()
+        in_scope.and_.return_value = intersected
+        nth_locator = mock.Mock()
+        intersected.nth.return_value = nth_locator
+
+        default = browser_qa._filtered_element_locator(
+            page, "textarea", within=None, test_id=None, nth=None
+        )
+        self.assertIs(default, base)
+
+        selected = browser_qa._filtered_element_locator(
+            page, "textarea", within="Chat composer", test_id="chat-composer", nth=1
+        )
+        page.get_by_role.assert_called_once_with("region", name="Chat composer", exact=True)
+        scope.locator.assert_called_once_with("textarea")
+        page.get_by_test_id.assert_called_once_with("chat-composer")
+        in_scope.and_.assert_called_once_with(test_id_locator)
+        intersected.nth.assert_called_once_with(1)
+        self.assertIs(selected, nth_locator)
+        with self.assertRaisesRegex(ValueError, "browser_element_filter_invalid"):
+            browser_qa._filtered_element_locator(
+                page, "textarea", within=None, test_id=None, nth=True
+            )
+
+
+class CandidateValueSafetyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_select_label_value_never_reaches_jev_or_trace(self):
+        canary = "select-option-value-canary"
+
+        class FixtureElement:
+            async def evaluate(self, script, value):
+                self.selected_value = value
+                return "selected"
+
+            async def dispose(self):
+                pass
+
+        class FixtureHandle:
+            def __init__(self):
+                self.element = FixtureElement()
+
+            def as_element(self):
+                return self.element
+
+        class FixtureFrame:
+            async def evaluate(self, script, options):
+                select_projection = script.split("if (tag === 'select')", 1)[1]
+                # Mirror the dangerous branch so the fixture fails if the
+                # production observer ever falls back to option.value again.
+                exposed = "option.value" in select_projection
+                return {"candidates": {
+                    "local-select": {
+                        "tag": "select",
+                        "label": "Region",
+                        "options": [canary if exposed else ""],
+                    }
+                }}
+
+            async def evaluate_handle(self, script, local_id):
+                return FixtureHandle()
+
+        class FixtureLocator:
+            async def inner_text(self, timeout=None):
+                return "synthetic fixture"
+
+        class FixturePage:
+            def __init__(self, frame):
+                self.frames = [frame]
+                self.main_frame = frame
+                self.url = "https://fixture.example.test/"
+
+            async def title(self):
+                return "Synthetic fixture"
+
+            def locator(self, selector):
+                return FixtureLocator()
+
+        frame = FixtureFrame()
+        page = FixturePage(frame)
+        session = {"attached": True, "page": page, "context": SimpleNamespace(pages=[page])}
+        jev = FakeJev()
+        result = await execute_browser_plan(
+            session,
+            [{"action": "select", "instruction": "Region", "value": canary}],
+            decision_client=jev,
+        )
+        self.assertEqual(result["status"], "steps_completed")
+        self.assertEqual(session["page"], page)
+        captured = json.dumps({"jev": jev.seen, "result": result})
+        self.assertNotIn(canary, captured)
+        decision = next(event for event in result["trace"] if event["event"] == "decision")
+        self.assertEqual(decision["candidate"]["options"], [""])
+
 
 class DecisionReceiptTests(unittest.TestCase):
     def test_credential_shaped_ids_and_statuses_are_not_retained(self):
@@ -328,6 +543,34 @@ class BrowserReceiptLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(receipt["validation_result"], "browser_expectation_failed")
         self.assertEqual(result["status"], "failed")
 
+    async def test_host_action_duration_excludes_jev_selection_latency(self):
+        clock_ms = 0.0
+
+        async def slow_choice(**_kwargs):
+            nonlocal clock_ms
+            clock_ms += 150.0
+            return SimpleNamespace(
+                choice="e1", confidence=0.9, probabilities={"e1": 0.9, "none": 0.1},
+                model="jev-test", latency_ms=150.0,
+            )
+
+        async def fast_action(*_args, **_kwargs):
+            nonlocal clock_ms
+            clock_ms += 5.0
+            return self.session["page"]
+
+        self.client.choose.side_effect = slow_choice
+        self.act.side_effect = fast_action
+
+        with mock.patch.object(browser_agent.time, "perf_counter", side_effect=lambda: clock_ms / 1_000):
+            result = await self.run_plan()
+
+        decision, = [event for event in result["trace"] if event["event"] == "decision"]
+        completed, = [event for event in result["trace"] if event["event"] == "step_completed"]
+        self.assertEqual(decision["latency_ms"], 150.0)
+        self.assertEqual(completed["host_action_ms"], 5.0)
+        self.act.assert_awaited_once()
+
     async def test_rejected_choices_never_act(self):
         for selected, confidence, validation, outcome in (
             ("e1", 0.1, "low_confidence", "rejected"),
@@ -359,11 +602,19 @@ class BrowserReceiptLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(receipt["host_action"], "")
         self.act.assert_not_awaited()
 
-    async def test_unexpected_action_error_is_unknown_without_raw_error(self):
-        self.act.side_effect = RuntimeError("private exception text")
-        receipt, = self.receipts(await self.run_plan())
-        self.assertEqual(receipt["outcome"], "unknown")
-        self.assertNotIn("private exception text", json.dumps(receipt))
+    async def test_unexpected_click_error_has_safe_reason_without_raw_error(self):
+        self.act.side_effect = RuntimeError(
+            "net::ERR_CONNECTION_RESET https://user:pass@example.test/path?token=canary#fragment cookie=secret"
+        )
+        result = await self.run_plan()
+        receipt, = self.receipts(result)
+        self.assertEqual(result["reason"], "browser_click_failed")
+        self.assertEqual(receipt["outcome"], "failed")
+        self.assertNotIn("canary", json.dumps(receipt))
+        safe_detail = json.dumps(result["reason_detail"])
+        self.assertIn("net::ERR_CONNECTION_RESET", safe_detail)
+        for private in ("user", "pass", "canary", "fragment", "secret"):
+            self.assertNotIn(private, safe_detail)
 
     async def test_provider_failure_is_recorded_without_host_action(self):
         self.client.choose.side_effect = JevError("jev_timeout")
@@ -421,6 +672,91 @@ class BrowserReceiptLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BrowserAgentIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_duplicate_labels_narrow_by_region_test_id_and_explicit_nth(self):
+        try:
+            started = await browser_qa.browser_start(
+                headless=True, browser_type="chromium", channel="msedge"
+            )
+        except RuntimeError as exc:
+            if "Executable doesn't exist" in str(exc):
+                self.skipTest("Install a Playwright browser to run the semantic locator fixture")
+            raise
+        sid = started["session_id"]
+
+        class AmbiguousJev(FakeJev):
+            async def choose(self, *, candidates, **kwargs):
+                self.attempts += 1
+                self.seen.append({"candidates": candidates, "instruction": kwargs.get("instruction", "")})
+                first = next(iter(candidates))
+                return SimpleNamespace(
+                    choice=first,
+                    confidence=0.3,
+                    probabilities={first: 0.3, "none": 0.7},
+                    model=self.model,
+                )
+
+        try:
+            async with browser_qa._session(sid) as session:
+                page = session["page"]
+                await page.set_content("""<!doctype html>
+                  <section role="region" aria-label="AoiDots composer">
+                    <label>Message <textarea id="aoi" placeholder="Write a message"></textarea></label>
+                  </section>
+                  <section role="region" aria-label="Chat composer" id="chat-region">
+                    <label>Message <textarea id="chat" data-testid="chat-composer"
+                      placeholder="Write a message"></textarea></label>
+                  </section>""")
+
+                ambiguous = AmbiguousJev()
+                result = await execute_browser_plan(
+                    session,
+                    [{"action": "fill", "instruction": "Message", "value": "must-not-fill"}],
+                    decision_client=ambiguous,
+                )
+                self.assertEqual(result["reason"], "jev_low_confidence")
+                self.assertEqual(len(ambiguous.seen[0]["candidates"]), 2)
+                self.assertEqual(await page.locator("#aoi").input_value(), "")
+                self.assertEqual(await page.locator("#chat").input_value(), "")
+
+                within = await execute_browser_plan(
+                    session,
+                    [{"action": "fill", "instruction": "Message", "value": "aoi-selected",
+                      "within": "AoiDots composer"}],
+                    decision_client=FakeJev(),
+                )
+                self.assertEqual(within["status"], "steps_completed")
+                self.assertEqual(await page.locator("#aoi").input_value(), "aoi-selected")
+                self.assertEqual(await page.locator("#chat").input_value(), "")
+
+                by_test_id = await execute_browser_plan(
+                    session,
+                    [{"action": "fill", "instruction": "Message", "value": "test-id-selected",
+                      "test_id": "chat-composer"}],
+                    decision_client=FakeJev(),
+                )
+                self.assertEqual(by_test_id["status"], "steps_completed")
+                self.assertEqual(await page.locator("#chat").input_value(), "test-id-selected")
+
+                by_nth = await execute_browser_plan(
+                    session,
+                    [{"action": "fill", "instruction": "Message", "value": "second-match",
+                      "nth": 1}],
+                    decision_client=FakeJev(),
+                )
+                self.assertEqual(by_nth["status"], "steps_completed")
+                self.assertEqual(await page.locator("#chat").input_value(), "second-match")
+
+                by_css_scope = await execute_browser_plan(
+                    session,
+                    [{"action": "fill", "instruction": "Message", "value": "css-selected",
+                      "within": "css:#chat-region"}],
+                    decision_client=FakeJev(),
+                )
+                self.assertEqual(by_css_scope["status"], "steps_completed")
+                self.assertEqual(await page.locator("#chat").input_value(), "css-selected")
+        finally:
+            await browser_qa.browser_close(sid)
+
     async def test_real_browser_executes_one_complete_semantic_plan(self):
         try:
             started = await browser_qa.browser_start()
@@ -455,6 +791,15 @@ class BrowserAgentIntegrationTests(unittest.IsolatedAsyncioTestCase):
             receipts = [event["receipt"] for event in result["trace"] if event["event"] == "decision"]
             self.assertEqual([row["outcome"] for row in receipts], ["succeeded", "succeeded"])
             self.assertEqual([row["host_action"] for row in receipts], ["type", "click"])
+            completed_steps = [event for event in result["trace"] if event["event"] == "step_completed"]
+            self.assertEqual([event["action"] for event in completed_steps], ["type", "click", "read"])
+            self.assertTrue(all(isinstance(event["host_action_ms"], (int, float)) for event in completed_steps))
+            self.assertTrue(all(event["host_action_ms"] >= 0 for event in completed_steps))
+            navigation = next(event for event in result["trace"] if event["event"] == "navigation_completed")
+            self.assertTrue(isinstance(navigation["host_action_ms"], (int, float)))
+            self.assertGreaterEqual(navigation["host_action_ms"], 0)
+            decisions = [event for event in result["trace"] if event["event"] == "decision"]
+            self.assertTrue(all(isinstance(event["latency_ms"], (int, float)) for event in decisions))
             self.assertEqual(receipts[-1]["validation_result"], "postcondition_verified")
             self.assertNotIn("Gateway JEV", json.dumps(receipts))
             sent = json.dumps(fake.seen, ensure_ascii=False)

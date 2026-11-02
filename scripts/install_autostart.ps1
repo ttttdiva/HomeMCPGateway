@@ -14,9 +14,9 @@ $PowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powersh
 $Launcher = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'connect_tunnel.ps1'))
 $PowerShell = [IO.Path]::GetFullPath($PowerShell)
 if (-not $TaskName) {
-    $TaskName = if ($Target -eq 'aoitalk') { 'Home MCP Gateway - AoiTalk' } else { 'Home MCP Gateway' }
+    $TaskName = if ($Target -eq 'aoitalk') { 'Home MCP Gateway - AoiTalk' } else { '80_HomeMCPGateway - ChatGPT' }
 }
-$Arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Watch -Target {1}' -f $Launcher, $Target
+$Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Watch -Target {1}' -f $Launcher, $Target
 $Action = New-ScheduledTaskAction -Execute $PowerShell -Argument $Arguments -WorkingDirectory $Root
 $Trigger = New-ScheduledTaskTrigger -AtLogOn -User $User
 $Principal = New-ScheduledTaskPrincipal -UserId $User -LogonType Interactive -RunLevel Limited

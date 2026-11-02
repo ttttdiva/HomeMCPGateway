@@ -12,6 +12,9 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $Python = Join-Path $Root ".venv\Scripts\python.exe"
 $SavedEnvironment = @{}
+$DisplayName = if ($Target -eq 'aoitalk') { 'AoiTalk MCP' } else { 'ChatGPT MCP' }
+try { $Host.UI.RawUI.WindowTitle = "80_HomeMCPGateway - $DisplayName (Secure Tunnel)" } catch {}
+Write-Host ("[{0}] [{1}] Starting Secure MCP Tunnel monitor (watch={2})" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $DisplayName, [bool]$Watch)
 
 try {
     # Literal KEY=VALUE only: never execute or interpolate credential file contents.
@@ -122,7 +125,11 @@ try {
                 $StatusJson = & $TunnelClient runtimes status $Alias --json
                 if ($LASTEXITCODE -ne 0) { throw "Tunnel status failed (exit $LASTEXITCODE)." }
                 $Status = $StatusJson | ConvertFrom-Json
-                $Status | Select-Object alias, process_running, healthy, ready, ui_url | Format-List
+                $StateLabel = if ($Status.process_running -and $Status.healthy -and $Status.ready) { 'READY' } else { 'WAITING' }
+                Write-Host ("[{0}] [{1}] {2} alias={3} running={4} healthy={5} ready={6}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $DisplayName, $StateLabel, $Alias, $Status.process_running, $Status.healthy, $Status.ready)
+                if ($Status.ui_url -and $Status.ready) {
+                    Write-Host ("[{0}] [{1}] Local status UI: {2}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $DisplayName, $Status.ui_url)
+                }
                 $Snapshot = [ordered]@{
                     checked_at = [DateTimeOffset]::Now.ToString('o')
                     supervisor_pid = $PID
@@ -152,6 +159,7 @@ try {
                 # Do not write native output, credentials, or exception bodies to the watchdog log.
                 $Note = '{0} Runtime check/connect failed; retrying in 30 seconds.' -f [DateTimeOffset]::Now.ToString('o')
                 Add-Content -LiteralPath $SupervisorLogPath -Value $Note
+                Write-Warning ("[{0}] [{1}] Tunnel check failed; retrying in 30 seconds. See supervisor.log." -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $DisplayName)
                 $NeedsConnect = $true
                 Start-Sleep -Seconds 30
             }
