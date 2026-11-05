@@ -1,11 +1,149 @@
 # AoiTalk の正準 Agent へローカル委譲する
 
-> **現行構成（Phase B `cc84cc7` 以降）:** 汎用 Gateway は常に78 toolsを公開し、AoiTalk tools 35個はAoiTalk専用 MCP 接続だけで公開します。`HOME_MCP_AOITALK_ENABLED` は無効な旧flagで、catalogに影響しません。
+> **現行構成（Phase B `cc84cc7` 以降）:** 汎用 Gateway は常に78 toolsを公開し、AoiTalk tools 35個はAoiTalk専用 MCP 接続だけで公開します。`HOME_MCP_AOITALK_ENABLED` は無効な旧flagで、catalogに影響しません。以下の日付付き受入記録とtool数は記録当時の履歴です。
 
 この経路は ChatGPT のモデル差し替えではありません。Gateway は目的と権限を
 AoiTalk の既存タスク API に渡し、AoiTalk が正準 Agent / AgentRevision / AgentRun /
 work と既存の共有ローカル runtime を使って実行します。Gateway に別の LLM loop、
 モデルカタログ、Strata 起動管理は追加しません。
+
+## 現在の適用状態（2026-10-13）
+
+41 の統合済み HEAD `b9db6a3ec359761d377f8dc902acbc60591e887e` で、
+Gateway のタスク関数 → 認証済み AoiTalk API → 正準 Agent / AgentRun / Work →
+実 Strata / Qwen の読み取り専用実行を確認しました。別の実行基盤は追加していません。
+
+既存 Agent 基盤で Gateway Strata を作成し、専用のモデル設定 profile
+`gateway-strata-local` を割り当てました。権限は `workspace_read`、
+通常の `general_worker` を使用し、他の Agent の route は変更していません。
+この初回受入は Agent ID を明示しています。下記のセッションC受入で省略時の既定 Agent も確認しました。
+
+初期試験で権限不足、未対応 effort、Strata artifact の旧ドライブ参照を検出しました。
+既存の権限設定と明示的な thinking effort を適用し、実タスクの runtime snapshot に
+一致するモデル配置へ既存 relocation helper で設定を更新した後、再試験が成功しました。
+モデルファイルの移動・削除や検証ガードの緩和は行っていません。
+
+成功時は LLM 3 回、読取ツール 2 回、書込 0 件、コマンド 0 件です。
+プロンプトに含めなかった marker を実ファイルから取得し、
+AgentRun / Work の succeeded とタスクの completed を確認しました。
+2026-10-13 04:35 UTC の読み取り専用 coordinator status では runtimes は空で、
+試験後のモデル runtime 解放も確認しています。
+
+この実測は Gateway の実装関数からの受入です。ChatGPT 側の接続メタデータ更新後に
+新しい 5 ツールを実際に呼べること、実モデルによる書込・コマンド・ADB・Git 操作まで
+確認したものではありません。安全な読取成功と、すべての開発操作の完成を区別します。
+証跡は [読み取り専用受入](evidence/gateway-strata-readonly-20261013.json) を参照してください。
+
+### セッションCのschema・接続受入
+
+80の5 task toolsは、入力のenum・範囲・配列上限・nullable・requiredと、
+出力のtask/route/service/result/eventsのnested schema・array・nullable・`$defs`/`$ref`を公開します。
+出力検証は既存の `CallToolResult` の `structuredContent` に行い、元のJSONに
+任意フィールドの既定値を追加したり、将来の業務フィールドを削除したりしません。
+業務エラーは `ok=false` と固定error codeを保持し、MCPの引数/transportエラーの
+`isError=true` と区別します。tool名・受付後のLLM loop・権限の境界は既存契約を使います。
+
+2026-10-13の実別venv受入では、41 `venv` のMCP 1.30.0から80 `.venv` のMCP 2.2.0を起動し、
+通常84 toolsと5 task toolsの全schema、既成功taskの構造化status再取得、連携OFFの76 tools、
+接続不可時の業務エラーと通常file toolの成功、scoped childの4 tools・scope拒否・禁止tool拒否を確認しました。
+各stdio接続を閉じた後に、この試験が起動した所有child PIDが消えたことも確認しています。
+初回の接続不可受入には閉じたloopback portを使っています。さらに23:56 JST、A/Bの正式停止枠で
+実41のAPI 3000 / Next 3002が閉じた状態でも、通常stdio84 toolsの
+`list_directory` が成功しました。task listは `ok=false / connection_error / isError=false` を返し、
+試験所有child 65240 / 68912は終了しました。実測7.816秒で、モデル・task受付・wakeは発生していません。
+[実41停止時のGateway回帰](evidence/gateway-stopped-41-20261013.json) を参照してください。
+2026-10-14のAPP_COLD追加枠では、正式停止通知後の開始port検証が不成立で、stdio/tool呼出前に中止しました。
+後続の読み取り専用観測では3000 / 3002に新しいPIDがあり、A/Bへ即時共有しています。
+この追加枠をPASSにはせず、[停止前提の失敗receipt](evidence/gateway-app-cold-stop-failure-20261014.json) に分けて保持します。
+A/Bは80と41のコードが同一であるため、Gatewayの停止時独立性には既存BOTHの実受入を再利用し、
+Cの追加停止チェックを不要としました。APP_COLDのstrict before・起動受入はBが別途所有します。
+fixtureはtask 30、profile 14、telemetry 5、通常stdio 5の計54件がPASSしました。
+実stdio再接続後の同じIdempotency-Keyは1 taskを再取得し、nested結果・nullable・空配列・
+業務エラーを保持し、schema違反のmodeはAPIへ送信前に拒否します。
+大量一覧の出力予算境界では数値やID/enumを文字列markerへ変換せず、収まらない値を省略し、
+task IDと状態を両方保持できないtaskは一覧へ出しません。`output_truncated` で省略を明示します。
+短いusernameとpublic protocolの名前/検証済みidentityが重なってもそれらを壊さず、
+passwordを含む識別子・route・keyは省略し、通常payloadと未知keyの秘匿を維持します。
+300通りの予算境界、実stdioの100-task大型一覧、credential衝突を回帰で確認しました。
+[実別venvとschema receipt](evidence/gateway-task-catalog-20261013.json) を参照してください。
+元依頼の10項目との対応・再利用した41側の隔離fixture/command証跡・残条件は
+[セッションC受入対応](evidence/gateway-session-c-20261013.json) に記録します。
+
+ChatGPT側は更新前の実画面で「Home MCP Gateway」が76 toolsを掲載し、
+5 task toolsがないことを確認しました。80のschema commit `9f906d5`をpush後、
+通常Tunnelを正規の `connect_tunnel.ps1` で再接続し、対象接続の「ツールを更新」で
+84 tools（Write 78 / Read 6）と5 task名の掲載を確認しました。
+新しいChatGPT会話からの `aoitalk_local_task_list(limit=1)` はGatewayのtelemetryでも
+1回の成功呼出（873.783 ms、`ok=true`）と照合でき、評価中のstart/cancelは0件です。
+ただし実画面はschema JSONを表示しないため、ChatGPTのモデルによるschema説明を
+raw `inputSchema/outputSchema` 一致の証明にはしません。初回はこのCodexチャットにも
+Gateway tool定義が未添付で、本人から一旦切断中との確認がありました。
+[ChatGPT受入receipt](evidence/gateway-chatgpt-catalog-20261013.json) を参照してください。
+
+2026-10-14、本人が受信側で5 toolsの展開済み公開型定義を保存catalogと照合し、
+required・enum・nullable・array・nested・各範囲の整合を確認して、この範囲で受入成功としました。
+実 `list(limit=60)` の認証成功、設定済み標準Agent、既存task `b4b555624e115ca99b06000128eb8785` の
+completed/succeeded・LLM3/file2/command0も本人報告で確認しています。
+生のinput/outputSchema JSONは取得できず、`$defs/$ref` の記述形式や非公開下位フィールドまで
+完全一致したとはしません。この取得制約は公開型の受入と区別して記録します。
+報告時のHEAD `794946e` と記録時の `6806222` の差分は資料だけで、Gateway実装は同一です。
+[受信公開型の本人受入](evidence/gateway-chatgpt-received-types-20261014.json) を参照してください。
+41の標準Agent設定保存・省略時解決はセッションAが所有し、80で別writerを作りません。
+### Agent省略の通常経路での成功
+
+2026-10-13 23:18 JST、稼働API source `7673b71` でAgent/provider/model/effortをすべて省略し、
+通常stdio → 認証済みAPI → 正準AgentWork/Run → 実Strata → file tool → 最終回答まで成功しました。
+task `b4b555624e115ca99b06000128eb8785`、Run `7c717f2a-5168-4c80-992d-0eba0795a32c`、
+Work `f8e84447-80ef-40ae-9ecc-50de2ab4fa27` が対応します。
+Agent/revisionは既存の `e9fd7414-492f-4a6a-aced-c5bd8f21f422` / `419bc59c-47f0-492f-8df7-f3bbfdd3ea85`、
+requested route `{}`、resolved `openai_compatible_local / qwen3.8-flash-next-iq3_xxs / thinking` でした。
+LLM 3回・file tool 2回・書込0・command0、実行768.988秒です。プロンプトに含めなかった
+`session-c-e030287a62a64868` を `acceptance.txt` から読み、最終回答で正確に返しました。
+ファイルmtimeはtask開始前を維持し、変更ファイルはありません。
+
+実行中の新stdio再接続と終了後の同キーPOSTは同じtaskを再取得しました。
+観測scriptはPID終了との競合で一度終了しましたが、再接続したstatusでcompleted/succeededと
+同じidentity・最終回答を取得できました。新しいtaskや副作用の再投入はしていません。
+所有Python/conhost/Strata PID `60056 / 61016 / 60488 / 64728` の全incarnation終了と
+coordinatorの `runtimes=[]` を確認し、coordinator PID 2940は同じbrokerのまま独立生存しています。
+
+モデル/pack/MTP/PLEの実argvはすべてF側でした。正常acquireが旧E snapshotから
+実効F snapshot `4db9c61d7b089b5cedeb587e3cd69e1fb752e93ef74c2a5186269a6799b056a1` をpublishしました。
+source `fb58e0d`、context 32768、prefill 256、vram reserve 2048、expert cache auto、port 8083、vision noneは維持しています。
+この起動はBのAPP_COLD条件PASSとは分けます。受入証跡は
+[Agent省略の実受入](evidence/gateway-default-agent-20261013.json) を参照してください。
+
+セッションAの読み取り専用DB照合とWork API HTTP 200では、同じtask/source、Agent/revision、
+sessionとRun/Workのsucceeded、Work lease owner/tokenの解放を確認しました。
+Workは14:18:15.734652 UTC、Runはその0.124552秒後の14:18:15.859204 UTCに終端しています。
+Run.resultとWork.result_summaryに `final_message` / report / checks / verified_tool_resultsが保存されています。
+このheadlessタスクは依頼専用sessionを持ち、既存Chatへassistant行を自動追加しない契約です。
+Chatへの明示取り込みは別のowner専用local-import操作であり、この受入では実施していません。
+23:48 JSTの通常Gateway statusも同じcompleted結果を再取得できました。
+[正準Run/Workの終端照合](evidence/gateway-default-agent-terminal-20261013.json) を参照してください。
+
+### 復旧前の失敗を保持
+
+2026-10-13 21:16 JST、セッションAが新しい稼働source `f948b72` で正規PATCH保存・
+GET/DB再取得を確認した後、Agent/provider/model/effortをすべて省略して通常stdioから
+read-only task `e901b00e5170575a9c3025cc8ebaceab` を作成しました。
+新しいstdio接続で同じIdempotency-Keyを送ると同じtaskを再取得し、
+Agent `e9fd7414-492f-4a6a-aced-c5bd8f21f422` / revision `419bc59c-47f0-492f-8df7-f3bbfdd3ea85`、
+requested route `{}`、resolved `openai_compatible_local / qwen3.8-flash-next-iq3_xxs / thinking` が一致しました。
+Run `de90447b-d76f-447e-89a4-591b30a5b864` / Work `d94c2796-842e-48c2-85cd-97b176bcb2a5`
+まで正準経路へadmitされましたが、共有coordinator接続timeoutで3秒ほどでfailedになりました。
+LLMカウンタ1は推論試行で、読取0・書込0・command0です。最終回答成功の証拠にはしません。
+
+coordinator不在時のWindows接続が `TimeoutError` となり、既存のclientはtimeoutに対して
+自動起動しないfail-closed契約を維持しました。既存の正規 `launch_coordinator` を41 venvから
+実行した結果も、継承kill-on-close Job `0x00002000` の所有ガードで拒否され、launcher PID 24052は終了しました。
+モデルworkerは起動していません。OS/Job設定、ガード、route、権限は変更していません。
+この `0x2000` はCodexのcommand contextから起動したchildでの観測で、
+稼働AoiTalk API/Supervisor自身のJob flagsを実証したものではありません。
+実taskのtimeoutと、この明示launcherの所有ガード拒否を分けて扱います。
+新しい稼働contextで正規の独立coordinatorをbootstrapできる境界をA/Bへ渡しました。
+Aによる正規復旧後の再受入は上記のAgent省略タスクで成功しています。
+[Agent省略の失敗receipt](evidence/gateway-default-agent-failure-20261013.json) に成功した解決/再取得と未達の実行を分けて記録します。
 
 ## ChatGPT → AoiTalk専用 MCP → AoiTalk
 
@@ -61,9 +199,45 @@ Agent の `command_execute` capability、設定済み harness root、既存の
 モデル起動前にコマンド runtime の readiness を確認します。80 の read-only stdio profile
 に shell ツールを追加する仕組みではありません。
 
+2026-10-12 の対象 Windows 環境では、既存の実効設定にある Ubuntu-22.04 と
+`/usr/local/bin/bwrap` を使った readiness probe が true であることを確認しています。
+この確認では永続設定を変更していません。同じ設定の開発 checkout で Windows 上の
+正準 Agent ORM smoke test が 1/1 成功しました（11.55秒、モデル応答のみ scripted fixture）。
+構造化 `create_file` で無害な printf script を作成し、実際の scope 付きコマンド実行、
+stdout / publication audit、実ファイルの読取、owner に結び付いた AgentRun の終端状態を
+確認しています。この隔離実行経路を含む共有基盤は2026-10-13にmain `b9db6a3`へ統合済みです。
+この段落のコマンド受入は scripted fixture です。2026-10-13の実Strata読取受入と、後述の実モデルcommand受入とは別の証拠です。
+同時点の共有 coordinator の profile / runtime 登録は空で、既存の無関係な llama GPU
+プロセスを採用・切替して検証したものではありません。
 readiness が false の環境では `command_runtime_unavailable` (HTTP 409) を返し、
 モデルや任意ホスト shell、別の実行系へ fallback しません。このエラーは受付結果不明ではなく
 設定/環境上の不備として扱い、盲目的に再送しません。
+
+2026-10-14の本人報告では、Agent省略・`mode=mutate / allow_commands=true` の隔離pwd相当試験
+（key `chatgpt-gateway-realmodel-pwd-20261014-a1`）は `connection_error`、`submission_uncertain=false`、
+task IDなしで受付できませんでした。その後のlistも失敗し、通常Gatewayのfile操作は成功しています。
+報告時刻がなく、特定のA/B再起動を原因とは断定しません。API復旧・現在のAgent権限・既存隔離readinessはAが確認します。
+既存標準Agentの受入権限は `workspace_read` のみです。接続復旧だけでコマンドの許可条件を満たしたとは扱いません。
+同じkeyの再送は同一依頼に限定し、Agent/route/scopeを変更する場合は別依頼・別keyとします。
+
+2026-10-14、Aは専用QA API `127.0.0.1:5572` の通常HTTP → 正準local task →
+AgentWork/Run → 実Strata/Qwen → 隔離commandの受入を完了しました。
+source `f9f72ea`、task `229feb76a24c5a4f9d519ac343838eeb`、
+Run `e9ae2c8b-20d2-47a8-8850-54d5fd58c984` / Work `9ce6b90c-39c9-42ac-8869-0b1cd3e4fbd1` はsucceededです。
+QA専用Agent `781a1373-ff44-4465-bb3b-108dafbf080a` / revision `617be529-95ac-4919-bd7d-ab67b9d08e62` は
+read/write/commandの3 capabilitiesを持ち、strict child workspace、既存trusted WSL/bwrap、network NONE、有限budgetを使用しました。
+標準Agent `e9fd…` の読取権限は変更していません。
+
+実モデルは7 LLM / 6 tools / 3 command要求で、2回の有限な失敗から回復し、
+`pwd; ls -1a; echo sandbox-ok` をexit 0で完了しました。markerの作成と読戻し、marker以外の追加タスクファイル0を確認しています。
+receiptの終了記録はunfinished background jobs 0、generation leases 0、モデルrelease後のruntime 0、
+所有API5572/model8083の閉鎖です。共有brokerは保持しています。
+CはAのreceipt SHA256を照合して、この限定結果を元依頼のcommand条件へ対応づけました。
+このタスクはQAの通常HTTP経路で、元のChatGPT keyの再投入、production API3000の復旧受入、formal Employee/SID endpointの受入ではありません。
+[実モデルの隔離command受入](evidence/gateway-strata-command-qa-20261014.json) を参照してください。
+
+セッションCの受入は、本人が受け入れた5 toolsの公開型、標準Agent省略の実読取、実別venv/scoped lifecycle、
+停止時の通常Gateway維持、上記の正規QA command経路を対応づけて完了です。生schema JSONの取得制約は記録に保持します。
 
 正準 Agent tool は既定でGit書込を拒否します。`allow_git_commit=true` は明示pathの
 `git add` と制限付き `git commit`、`allow_git_push=true` は通常のブランチrefspecによる

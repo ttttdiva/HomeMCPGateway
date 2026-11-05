@@ -12,8 +12,7 @@ import secrets
 from gateway_muse_http import _read_secret_file
 
 
-# Replace with your own HTTPS MCP origin before running this optional helper.
-PUBLIC_ORIGIN = "https://your-mcp-host.example"
+PUBLIC_ORIGIN = "https://nk-h01.f5.si"
 PREFIX = "/claude-mcp"
 
 

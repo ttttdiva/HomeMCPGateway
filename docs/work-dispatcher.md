@@ -181,3 +181,21 @@ verify the old watch process, then launch the reviewed code. This implementation
 `python -m unittest tests.test_work_dispatcher tests.test_work_supervisor tests.test_aoitalk_cli_sessions tests.test_jobs` (repo `.venv`).
 Tests use a fake idempotent backend and injected clock/faults; they prove module behavior only — not a running
 daemon, an armed queue, a real task, or reboot recovery.
+# Codex job temporary output
+
+For direct official Codex argv jobs with a repository cwd, Gateway defaults each
+unspecified TEMP, TMP and TMPDIR to `<repo>/.runtime/codex-job-temp/<job-id>`.
+Explicit environment values win independently. The destination is recorded as
+`codex_temp_default` in job metadata and is retained after termination: child
+processes or later inspection may still need it. Remove it only after confirming
+the job and its descendants no longer use it. String shell commands and other
+apps keep their existing environment. Non-repository work keeps its requested
+cwd and uses the Gateway repository's owned `.runtime/codex-job-temp/<job-id>`
+as a fallback. A repository with an unwritable runtime directory uses the same
+fallback. This does not prohibit legitimate external work or change machine
+TEMP settings.
+
+Example caller instruction: “Run this job with an explicit repository cwd; put
+temporary files, logs and outputs under its owned `.runtime/<task>/`. If an
+external location is needed, state its path, reason, owner and cleanup lifecycle.”
+External locations remain available when explicitly chosen.

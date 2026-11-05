@@ -2,7 +2,7 @@
 
 ## Architecture
 - One existing Cloudflare Tunnel: `aoitalk-home`. **Do not create another Tunnel or cloudflared service.**
-- Cloudflare ingress: `<public-host>` `^/claude-mcp/[0-9a-f]{64}/mcp$` to `http://127.0.0.1:8766`.
+- Cloudflare ingress: `nk-h01.f5.si` `^/claude-mcp/[0-9a-f]{64}/mcp$` to `http://127.0.0.1:8766`.
 - Windows task: `80_HomeMCPGateway - Claude Code`.
 - Server: `scripts/gateway_muse_http.py --prefix /claude-mcp`, using the same unrestricted `home_mcp_gateway.server` registry as ChatGPT/Muse. Do not copy tools.
 - Separate credential files for Claude: `.local/claude-code-mcp/secrets/path.secret`, `token.secret`.

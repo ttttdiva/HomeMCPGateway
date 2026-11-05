@@ -226,51 +226,16 @@ def _uniform(picture: Image.Image) -> bool:
     return all(low == high for low, high in picture.convert("RGB").getextrema())
 
 
-def _wgc_frame(hwnd: int, timeout: float = 3.0) -> Image.Image:
-    """One Windows Graphics Capture frame of the whole window, as RGB."""
-    try:
-        from windows_capture import WindowsCapture
-        import numpy
-    except Exception as exc:  # optional dependency
-        raise RuntimeError(f"windows-capture is not installed ({type(exc).__name__}: {exc}); pip install windows-capture") from exc
-    done, box = threading.Event(), {}
-    capture = WindowsCapture(cursor_capture=False, draw_border=False, window_hwnd=hwnd)
-
-    @capture.event
-    def on_frame_arrived(frame, control):
-        if "image" not in box:
-            try:
-                # BGRA -> RGB. The mapped GPU buffer is only valid inside this
-                # callback, so copy before signalling.
-                box["image"] = Image.fromarray(numpy.ascontiguousarray(frame.frame_buffer[:, :, 2::-1]), "RGB")
-            except Exception as exc:
-                box["error"] = f"{type(exc).__name__}: {exc}"
-        done.set()
-        control.stop()
-
-    @capture.event
-    def on_closed():
-        done.set()
-
-    control = capture.start_free_threaded()
-    try:
-        if not done.wait(timeout):
-            raise TimeoutError(f"no frame within {timeout}s (window minimized, protected, or not capturable)")
-    finally:
-        try:
-            control.stop()
-            control.wait()
-        except Exception:
-            pass
-    if "image" not in box:
-        raise RuntimeError(box.get("error") or "Windows Graphics Capture closed without a frame")
-    return box["image"]
+def _wgc_frame(hwnd: int, expected_pid: int, timeout: float = 3.0) -> Image.Image:
+    """Capture in a disposable process so native faults cannot terminate the Gateway."""
+    from . import desktop_capture
+    return desktop_capture.request(hwnd, expected_pid, timeout)
 
 
 def _capture_wgc(user, hwnd: int, info: dict, client: dict):
     """Windows Graphics Capture reads the DWM-composed surface, so GPU-drawn
     viewports (Blender, games, browsers, Electron) are captured, unlike PrintWindow."""
-    frame = _wgc_frame(hwnd)
+    frame = _wgc_frame(hwnd, info["pid"])
     window, extended = info["bounds"], _dwm_frame(hwnd)
     # The frame covers the visible frame; locate it on screen to crop the client area.
     if extended and (frame.width, frame.height) == (extended["width"], extended["height"]):

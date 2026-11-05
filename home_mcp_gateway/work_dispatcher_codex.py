@@ -116,17 +116,31 @@ class GatewayJobAdapter:
     def __init__(self, runtime_dir: str | None = None):
         self.runtime_dir = runtime_dir
 
+    def _restore_identity(self, result: dict[str, Any]) -> dict[str, Any]:
+        # The dispatcher compares immutable launch fields exactly; the public
+        # response may replace oversized fields with a truncation marker.
+        fields = set(result.get("metadata_truncated_fields", ())) & {"command", "dispatcher_binding"}
+        if fields and result.get("job_id"):
+            from .jobs import _directory, _read
+            try:
+                metadata = _read(_directory(result["job_id"], self.runtime_dir) / "metadata.json")
+                if metadata.get("job_id") == result["job_id"]:
+                    result = {**result, **{key: metadata[key] for key in fields if key in metadata}}
+            except (OSError, ValueError, TypeError):
+                pass  # Exact matching fails closed when the audit record is unavailable.
+        return result
+
     def start(self, request: dict[str, Any], idempotency_key: str, request_fingerprint: str,
               dispatcher_binding: dict[str, Any]) -> dict[str, Any]:
         from .jobs import job_start
         if request.get("transport") == APP_SERVER_TRANSPORT:
-            return job_start(request["command"], cwd=request["cwd"], runtime_dir=self.runtime_dir,
+            return self._restore_identity(job_start(request["command"], cwd=request["cwd"], runtime_dir=self.runtime_dir,
                              idempotency_key=idempotency_key, request_fingerprint=request_fingerprint,
                              dispatcher_binding=dispatcher_binding, transport=APP_SERVER_TRANSPORT,
-                             app_server=request["app_server"])
-        return job_start(request["command"], cwd=request["cwd"], runtime_dir=self.runtime_dir,
+                             app_server=request["app_server"]))
+        return self._restore_identity(job_start(request["command"], cwd=request["cwd"], runtime_dir=self.runtime_dir,
                          idempotency_key=idempotency_key, request_fingerprint=request_fingerprint,
-                         dispatcher_binding=dispatcher_binding)
+                         dispatcher_binding=dispatcher_binding))
 
     def status(self, gateway_job_id: str) -> dict[str, Any]:
         from .jobs import job_status, _directory, _read
@@ -148,7 +162,7 @@ class GatewayJobAdapter:
         except (OSError, ValueError, TypeError):
             if status.get("transport") == APP_SERVER_TRANSPORT:
                 status["error_code"] = "appserver_metadata_unavailable"
-        return status
+        return self._restore_identity(status)
 
 
 def worker_launch_guard(binding: dict[str, Any], launch_data: dict[str, Any]) -> str:

@@ -150,3 +150,180 @@ class DesktopCaptureBoundaryTests(unittest.IsolatedAsyncioTestCase):
         observe.assert_called_once()
         self.activate.assert_not_called()
         self.perform.assert_not_called()
+
+class WGCWorkerBoundaryTests(unittest.TestCase):
+    """Only fixed synthetic Python children; no native desktop or network access."""
+    def setUp(self):
+        from home_mcp_gateway import desktop_capture as capture
+        self.capture = capture
+        self.children = []
+        real_popen = capture.subprocess.Popen
+        self.popen_type = real_popen
+        def track(*args, **kwargs):
+            child = real_popen(*args, **kwargs)
+            self.children.append(child)
+            return child
+        self.patcher = patch.object(capture.subprocess, "Popen", side_effect=track)
+        self.patcher.start()
+        self.addCleanup(self.patcher.stop)
+        self.addCleanup(self.assert_children_exited)
+
+    def assert_children_exited(self):
+        for child in self.children:
+            self.assertIsNotNone(child.poll())
+
+    def run_code(self, code, timeout=3):
+        import sys
+        return self.capture._run([sys.executable, "-B", "-c", code], 123, 456, timeout)
+
+    def payload(self, image=None, **metadata):
+        image = image or Image.new("RGB", (3, 2), "red")
+        stream = io.BytesIO()
+        image.save(stream, format="PNG")
+        return json.dumps(dict(hwnd=123, pid=456, png=base64.b64encode(stream.getvalue()).decode(), **metadata))
+
+    def emit(self, payload):
+        return self.run_code("import sys; sys.stdout.write(" + repr(payload) + ")")
+
+    def test_success_and_untrusted_payloads(self):
+        image = self.emit(self.payload())
+        self.assertEqual((image.mode, image.size), ("RGB", (3, 2)))
+        bad = ["{", json.dumps({"hwnd": 123, "pid": 456, "png": "!!!!"}),
+               self.payload(Image.new("RGBA", (3, 2))),
+               self.payload().replace('"hwnd": 123', '"hwnd": 124'),
+               self.payload().replace('"pid": 456', '"pid": 457')]
+        obj = json.loads(self.payload())
+        raw = base64.b64decode(obj['png'])
+        obj['png'] = base64.b64encode(raw[:30]).decode()
+        bad.append(json.dumps(obj))
+        for value in bad:
+            with self.subTest(value=value[:50]), self.assertRaisesRegex(RuntimeError, "invalid payload"):
+                self.emit(value)
+        with patch.object(self.capture, "MAX_OUTPUT", 64):
+            with self.assertRaisesRegex(RuntimeError, "failed"):
+                self.run_code("import sys; sys.stdout.write('x' * 100000)")
+        with patch.object(self.capture, "MAX_PIXELS", 2):
+            with self.assertRaisesRegex(RuntimeError, "invalid payload"):
+                self.emit(self.payload())
+        with patch.object(self.capture, "MAX_PNG", 8):
+            with self.assertRaisesRegex(RuntimeError, "invalid payload"):
+                self.emit(self.payload())
+
+    def test_nonzero_and_timeout_fall_back_to_nonuniform_printwindow(self):
+        from contextlib import nullcontext
+        info = dict(hwnd=123, pid=456, visible=True, minimized=False, bounds=bounds(0, 0, 3, 2))
+        fallback = Image.new("RGB", (3, 2), "black")
+        fallback.putpixel((0, 0), (255, 255, 255))
+        for code, timeout in [("import os; os._exit(7)", 3), ("import time; time.sleep(10)", .15)]:
+            with self.subTest(code=code), ExitStack() as stack:
+                stack.enter_context(patch.object(d, "_user32", return_value=MagicMock()))
+                stack.enter_context(patch.object(d, "_physical_pixels", side_effect=lambda _: nullcontext()))
+                stack.enter_context(patch.object(d, "_window_info", return_value=info))
+                stack.enter_context(patch.object(d, "_client_bounds", return_value=info['bounds']))
+                stack.enter_context(patch.object(d, "_wgc_frame", side_effect=lambda *a: self.run_code(code, timeout)))
+                stack.enter_context(patch.object(d.ImageGrab, "grab", return_value=fallback))
+                result = d.capture_window(123, 456)
+                data = result.structured_content
+                self.assertEqual(data['capture_backend'], 'printwindow')
+                self.assertFalse(data['uniform_image'])
+                self.assertFalse(data['capture_attempts'][0]['ok'])
+                with self.assertRaisesRegex(ValueError, 'capture_failed'):
+                    d.capture_window(123, 456, 'wgc')
+
+    def test_cancellation_kills_and_reaps_child(self):
+        real_wait = self.popen_type.wait
+        interrupted_once = [False]
+        def interrupted(child, timeout=None):
+            if timeout is not None and not interrupted_once[0]:
+                interrupted_once[0] = True
+                raise KeyboardInterrupt()
+            return real_wait(child, timeout=timeout)
+        with patch.object(self.popen_type, 'wait', new=interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_code('import time; time.sleep(10)')
+
+    def test_geometry_and_flat_reporting(self):
+        info = dict(hwnd=123, pid=456, visible=True, minimized=False, bounds=bounds(0, 0, 3, 2))
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(d, '_user32', return_value=MagicMock()))
+            stack.enter_context(patch.object(d, '_physical_pixels', side_effect=lambda _: nullcontext()))
+            window = stack.enter_context(patch.object(d, '_window_info', return_value=info))
+            stack.enter_context(patch.object(d, '_client_bounds', return_value=info['bounds']))
+            stack.enter_context(patch.object(d, '_dwm_frame', return_value=None))
+            stack.enter_context(patch.object(d, '_wgc_frame', return_value=Image.new('RGB', (3, 2))))
+            stack.enter_context(patch.object(d.ImageGrab, 'grab', return_value=Image.new('RGB', (3, 2))))
+            data = d.capture_window(123, 456).structured_content
+            self.assertTrue(data['uniform_image'])
+            self.assertEqual([a['uniform_image'] for a in data['capture_attempts']], [True, True])
+            window.side_effect = [info, {**info, 'bounds': bounds(0, 0, 4, 2)}]
+            with self.assertRaisesRegex(ValueError, 'stale_observation'):
+                d.capture_window(123, 456)
+    def test_child_rejects_foreign_target_before_capture(self):
+        import ctypes
+        import sys
+        from types import SimpleNamespace
+        fake_user = MagicMock()
+        fake_user.IsWindow.return_value = 1
+        def foreign(hwnd, owner):
+            owner._obj.value = 999
+            return 1
+        fake_user.GetWindowThreadProcessId.side_effect = foreign
+        fake_capture = MagicMock()
+        with patch.object(ctypes, 'WinDLL', return_value=fake_user), patch.dict(sys.modules, {
+                'numpy': MagicMock(), 'windows_capture': SimpleNamespace(WindowsCapture=fake_capture)}):
+            with self.assertRaisesRegex(RuntimeError, 'target changed'):
+                self.capture._worker(123, 456)
+        fake_capture.assert_not_called()
+
+    def test_stdout_retaining_descendant_cleanup_on_all_exits(self):
+        import os
+        import psutil
+        import sys
+        import time
+        original_read = os.read
+        original_wait = self.popen_type.wait
+        for scenario in ('exit', 'nonzero', 'timeout', 'oversize', 'cancel'):
+            with self.subTest(scenario=scenario):
+                seen = bytearray()
+                cancelled = [False]
+                def record(fd, count):
+                    part = original_read(fd, count)
+                    seen.extend(part)
+                    return part
+                def interrupt_after_identity(child, timeout=None):
+                    if scenario == 'cancel' and b'\n' in seen and not cancelled[0]:
+                        cancelled[0] = True
+                        raise KeyboardInterrupt()
+                    return original_wait(child, timeout=timeout)
+                descendant = 'import time; time.sleep(30)'
+                tail = {'exit': 'pass', 'nonzero': '__import__("os")._exit(7)', 'timeout': 'time.sleep(30)',
+                        'oversize': "sys.stdout.write('x'*100000); sys.stdout.flush(); time.sleep(30)",
+                        'cancel': 'time.sleep(30)'}[scenario]
+                code = ("import subprocess,sys,time,psutil; "
+                        "p=subprocess.Popen([sys.executable,'-B','-c'," + repr(descendant) + "], "
+                        "creationflags=subprocess.CREATE_NO_WINDOW); "
+                        "print(str(p.pid)+','+repr(psutil.Process(p.pid).create_time()),flush=True); " + tail)
+                start = time.monotonic()
+                with patch.object(os, 'read', side_effect=record), \
+                     patch.object(self.popen_type, 'wait', new=interrupt_after_identity), \
+                     patch.object(self.capture, 'MAX_OUTPUT', 1024), \
+                     patch.object(self.capture.threading, 'Thread', side_effect=AssertionError('reader thread forbidden')):
+                    with self.assertRaises(KeyboardInterrupt if scenario == 'cancel' else RuntimeError):
+                        self.run_code(code, 1.5 if scenario == 'timeout' else 3)
+                self.assertLess(time.monotonic() - start, 5)
+                self.assertIn(b'\n', seen, 'fixture must publish descendant identity before cleanup')
+                pid_text, created_text = bytes(seen).split(b'\n', 1)[0].split(b',')
+                pid, created = int(pid_text), float(created_text)
+                end = time.monotonic() + 2
+                while time.monotonic() < end:
+                    try:
+                        proc = psutil.Process(pid)
+                        if proc.create_time() != created or not proc.is_running():
+                            break
+                    except psutil.NoSuchProcess:
+                        break
+                    time.sleep(.02)
+                else:
+                    self.fail('the owned descendant with the recorded creation time survived')
+                if scenario == 'cancel':
+                    self.assertTrue(cancelled[0])

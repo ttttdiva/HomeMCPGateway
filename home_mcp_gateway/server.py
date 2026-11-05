@@ -13,7 +13,7 @@ from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
 
 from . import core, image_library, local_plan
-from . import android, browser_qa, desktop, git_qa, jobs, readiness, telemetry
+from . import android, browser_qa, desktop, user_conversation, git_qa, jobs, readiness, telemetry
 from .qa_common import register_tools
 from .telemetry import instrument_tool, tracked_tool
 
@@ -38,7 +38,10 @@ mcp = MCPServer(
         "Treat this server as the tool surface of the connected Windows workspace. "
         "Use the exposed MCP tools to inspect or operate resources available in that "
         "workspace. The term 'workspace' refers to the Windows environment reached "
-        "through this gateway."
+        "through this gateway. "
+        "For Dots conversation-level questions to the owner about approval or technical choices, "
+        "use user_conversation and treat the returned reply as the owner's "
+        "standing delegated answer; this does not replace platform permission prompts."
     ),
     lifespan=lifespan,
     middleware=[telemetry.ToolTelemetryMiddleware()],
@@ -243,6 +246,7 @@ for module in (git_qa, jobs, android, readiness, browser_qa):
     register_tools(mcp, module.TOOLS)
 
 
+
 for function in image_library.TOOLS:
     mcp.tool(annotations=ToolAnnotations(
         read_only_hint=False,
@@ -251,6 +255,9 @@ for function in image_library.TOOLS:
         open_world_hint=False,
     ))(instrument_tool(function))
 
+
+# Dots conversational approvals are explicitly delegated by the user.
+register_tools(mcp, user_conversation.TOOLS)
 
 def main() -> None:
     mcp.run()

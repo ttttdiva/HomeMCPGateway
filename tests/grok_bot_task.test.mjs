@@ -556,6 +556,67 @@ test("saved correlation reads the requested thread after the item leaves the tra
   assert.equal(ledger.rows.get(TASK_ID).transport_state, "accepted");
 });
 
+test("reconcile retains discovered correlation after forty unrelated messages and checks current thread evidence", async () => {
+  const ledger = makeLedger({ initialRecord: {
+    operation_id: TASK_ID, account_identity: ACCOUNT, team_identity: TEAM,
+    target_identity: TARGET,
+    prompt_sha256: createHash("sha256").update(TASK_PROMPT, "utf8").digest("hex"),
+    client_nonce: CLIENT_NONCE, transport_state: "unknown",
+  } });
+  const reconcile = async (fetchOptions) => {
+    const network = makeFetch(fetchOptions);
+    const result = await runGrokBotTask({
+      mode: "reconcile", input: { operation_id: TASK_ID },
+      dependencies: syntheticDependencies(syntheticProfile(), network.fetchImpl),
+      ledgerCall: ledger.ledgerCall,
+    });
+    assert.equal(network.calls.some((call) => call.method === "/api/sendPrompt"), false);
+    return { result, network };
+  };
+  const first = await reconcile({ transcript: [observedUser(CLIENT_NONCE), observedReply()] });
+  assert.equal(first.result.inspection_status, "observed");
+  assert.equal(first.result.response_available, true);
+  const correlation = first.result.correlation;
+  assert.deepEqual(correlation, {
+    request_message_id: "synthetic-user-message-id",
+    request_id: "synthetic-request-run-id", root_id: "synthetic-user-message-id",
+  });
+  const shiftedTail = Array.from({ length: 40 }, (_, i) =>
+    observedUser(`unrelated-${i}`, { id: `unrelated-${i}`, requestId: `other-${i}` }));
+  const second = await reconcile({ transcript: shiftedTail, thread: {
+    rootId: correlation.root_id, entries: [observedReply("current synthetic reply")],
+  } });
+  assert.deepEqual(second.result.correlation, correlation);
+  assert.equal(second.result.inspection_status, "observed");
+  assert.equal(second.result.response_available, true);
+  assert.deepEqual(second.result.replies, ["current synthetic reply"]);
+  assert.equal(second.network.calls.some((call) => call.method === "/api/getAgentTranscriptTail"), false);
+  assert.deepEqual(second.network.calls.find((call) => call.method === "/api/getAgentThread").body,
+    { id: TARGET, rootId: correlation.root_id });
+
+  for (const reply of [
+    observedReply("wrong root", { rootId: "other-root" }),
+    observedReply("wrong request", { requestId: "other-request" }),
+    observedReply("wrong nonce", { clientNonce: "other-nonce" }),
+  ]) {
+    const checked = await reconcile({ thread: { rootId: correlation.root_id, entries: [reply] } });
+    assert.equal(checked.result.inspection_status, "pending");
+    assert.equal(checked.result.response_available, false);
+    assert.deepEqual(checked.result.replies, []);
+    assert.deepEqual(checked.result.correlation, correlation);
+  }
+  const wrongThread = await reconcile({ thread: {
+    rootId: "other-root", entries: [observedReply("wrong thread")],
+  } });
+  assert.equal(wrongThread.result.inspection_status, "unknown");
+  assert.equal(wrongThread.result.response_available, false);
+  assert.equal(wrongThread.result.inspection_error.code, "THREAD_ROOT_MISMATCH");
+  const empty = await reconcile({ thread: { rootId: correlation.root_id, entries: [] } });
+  assert.equal(empty.result.inspection_status, "pending");
+  assert.equal(empty.result.response_available, false);
+  assert.deepEqual(empty.result.replies, []);
+});
+
 test("foreign target or nonce evidence cannot create a saved correlation", async () => {
   const { result, network, ledger } = await execute({
     fetchOptions: {

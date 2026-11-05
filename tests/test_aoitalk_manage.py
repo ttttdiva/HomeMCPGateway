@@ -526,7 +526,7 @@ class DedicatedServerTests(unittest.TestCase):
                 *aoitalk_cli_sessions.TOOLS,
             )}
             self.assertEqual(len(dedicated_tools), 35)
-            self.assertEqual(set(generic_tools), set(contract["generic_names"]))
+            self.assertEqual(set(generic_tools), set(contract["generic_names"]) | {"user_conversation"})
             self.assertFalse(any(name.startswith("aoitalk_") for name in generic_tools))
             self.assertEqual(set(dedicated_tools), expected | {fn.__name__ for fn in manage.TOOLS})
             self.assertEqual(expected, set(contract["removed_generic_names"]))

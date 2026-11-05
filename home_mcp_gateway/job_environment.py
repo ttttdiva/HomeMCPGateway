@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
+
+
+_GATEWAY_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 _ALLOWED_EXACT_NAMES = frozenset(
@@ -198,3 +202,43 @@ def build_job_environment(
         "env_dropped_secret_like_names": sorted(set(secret_names), key=str.upper),
     }
     return child_environment, metadata
+
+
+def apply_codex_temp_default(command: str | list[str], cwd: str, job_id: str,
+                             explicit: Mapping[str, Any] | None,
+                             child: dict[str, Any]) -> dict[str, Any]:
+    """Set per-job defaults only for recognizable direct official Codex argv."""
+    if not isinstance(command, list) or not command or not all(isinstance(x, str) for x in command):
+        return {}
+    parts = command[0].replace("\\", "/").lower().split("/")
+    native = (len(parts) >= 7 and parts[-1] in {"codex.exe", "codex"}
+              and parts[-2] == "bin" and parts[-4] == "vendor"
+              and parts[-5].startswith("codex-") and parts[-6] == "@openai"
+              and parts[-7] == "node_modules")
+    entry = command[1].replace("\\", "/").lower().split("/") if len(command) > 1 else []
+    node = (parts[-1] in {"node.exe", "node"} and
+            entry[-5:] == ["node_modules", "@openai", "codex", "bin", "codex.js"])
+    if not (native or node):
+        return {}
+    names = {str(k).upper() for k in (explicit or {})}
+    missing = {"TEMP", "TMP", "TMPDIR"} - names
+    if not missing:
+        return {}
+    working = Path(cwd)
+    root = next((p for p in (working, *working.parents) if (p / ".git").exists()), None)
+    # Non-repository work is legitimate. Keep its cwd unchanged and own its
+    # temporary output in the Gateway repository instead of shared/home Temp.
+    root = root if root is not None and working.is_dir() else _GATEWAY_REPO_ROOT
+    destination = root / ".runtime" / "codex-job-temp" / job_id
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        if root == _GATEWAY_REPO_ROOT:
+            raise
+        destination = _GATEWAY_REPO_ROOT / ".runtime" / "codex-job-temp" / job_id
+        destination.mkdir(parents=True, exist_ok=True)
+    for key in list(child):
+        if str(key).upper() in missing:
+            del child[key]
+    child.update({name: str(destination) for name in missing})
+    return {"codex_temp_default": str(destination)}

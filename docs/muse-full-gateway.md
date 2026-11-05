@@ -11,7 +11,7 @@ HTTP server は `127.0.0.1:8765` だけで待ち受けます。URL path に既�
 既存 Muse connector の URL 形式を保ちます。
 
 ```text
-https://<public-host>/muse-mcp/<path-secret>/mcp
+https://nk-h01.f5.si/muse-mcp/<path-secret>/mcp
 ```
 
 Cloudflare Tunnel の Muse 用 ingress は、秘密 path を含む既存ルールから `http://127.0.0.1:8765` に転送しています。読み取り専用の現状確認で既存ルールと secret の一致を確認しました。公開経路と Muse connector 設定は変更しません。サーバーだけを同じ loopback port で差し替えるため、URL や秘密の再発行は不要です。

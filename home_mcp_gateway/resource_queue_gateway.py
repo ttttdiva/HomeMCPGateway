@@ -843,7 +843,9 @@ class GatewayRunner:
             return {"ok": False, "job_id": job_id, "status": "unknown", "error": "job_metadata_mismatch",
                     "mismatch": bad, "checks": checks, "job": metadata}
         combined = dict(metadata)
-        combined.update(observed)
+        # Keep exact disk metadata when a public field is a truncation marker.
+        truncated = set(observed.get("metadata_truncated_fields", ()))
+        combined.update({key: value for key, value in observed.items() if key not in truncated})
         combined["job_id"] = job_id
         combined["cancel_path"] = prepared.cancel_path
         combined["ok"] = True

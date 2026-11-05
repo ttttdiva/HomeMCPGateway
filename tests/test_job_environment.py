@@ -3,9 +3,66 @@ import json
 import pytest
 
 from home_mcp_gateway.job_environment import (
+    apply_codex_temp_default,
     build_job_environment,
     is_secret_like_environment_name,
 )
+
+
+@pytest.mark.parametrize("command", [
+    ["C:/install/node.exe", "C:/install/node_modules/@openai/codex/bin/codex.js", "exec"],
+    ["C:/install/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe", "exec"],
+])
+def test_codex_temp_default_is_per_job_and_preserves_explicit_values(tmp_path, command):
+    (tmp_path / ".git").mkdir()
+    cwd = tmp_path / "src"
+    cwd.mkdir()
+    child = {"Temp": "shared", "TMP": "shared", "tmpdir": "explicit"}
+    metadata = apply_codex_temp_default(command, str(cwd), "job-1", {"tmpdir": "explicit"}, child)
+    target = tmp_path / ".runtime" / "codex-job-temp" / "job-1"
+    assert target.is_dir()
+    assert child == {"TEMP": str(target), "TMP": str(target), "tmpdir": "explicit"}
+    assert metadata == {"codex_temp_default": str(target)}
+
+
+def test_codex_temp_default_leaves_other_jobs_and_owns_nonrepo_temp(tmp_path, monkeypatch):
+    from pathlib import Path
+    import home_mcp_gateway.job_environment as environment
+    gateway_root = tmp_path / "gateway"
+    monkeypatch.setattr(environment, "_GATEWAY_REPO_ROOT", gateway_root)
+    original_exists = Path.exists
+    monkeypatch.setattr(Path, "exists", lambda path: False if path.name == ".git" else original_exists(path))
+    child = {"TEMP": "shared"}
+    assert apply_codex_temp_default(["other.exe"], str(tmp_path), "job", {}, child) == {}
+    assert apply_codex_temp_default("codex exec", str(tmp_path), "job", {}, child) == {}
+    result = apply_codex_temp_default(["node.exe", "x/node_modules/@openai/codex/bin/codex.js"], str(tmp_path), "job", {}, child)
+    target = gateway_root / ".runtime" / "codex-job-temp" / "job"
+    assert result == {"codex_temp_default": str(target)}
+    assert child == {key: str(target) for key in ("TEMP", "TMP", "TMPDIR")}
+    assert target.is_dir()
+    assert not (tmp_path / ".runtime").exists()
+
+
+def test_codex_temp_default_falls_back_when_repository_temp_is_not_writable(tmp_path, monkeypatch):
+    from pathlib import Path
+    import home_mcp_gateway.job_environment as environment
+    repo = tmp_path / "readonly-repo"
+    repo.mkdir()
+    (repo / ".git").write_text("gitdir: worktree")
+    gateway_root = tmp_path / "gateway"
+    monkeypatch.setattr(environment, "_GATEWAY_REPO_ROOT", gateway_root)
+    original_mkdir = Path.mkdir
+    def mkdir(path, *args, **kwargs):
+        if repo in path.parents:
+            raise PermissionError("readonly repository")
+        return original_mkdir(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    child = {}
+    result = apply_codex_temp_default(["node.exe", "x/node_modules/@openai/codex/bin/codex.js"], str(repo), "fallback-job", {}, child)
+    target = gateway_root / ".runtime" / "codex-job-temp" / "fallback-job"
+    assert result == {"codex_temp_default": str(target)}
+    assert all(child[key] == str(target) for key in ("TEMP", "TMP", "TMPDIR"))
+    assert target.is_dir()
 
 
 def test_minimal_allowlist_keeps_required_platform_and_tool_environment():

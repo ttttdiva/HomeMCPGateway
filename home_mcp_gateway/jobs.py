@@ -18,7 +18,7 @@ import math
 import psutil
 
 from .core import _decode
-from .job_environment import build_job_environment
+from .job_environment import apply_codex_temp_default, build_job_environment
 from .work_dispatcher_codex import APP_SERVER_TRANSPORT
 
 ACTIVE = {"starting", "running", "stopping"}
@@ -394,6 +394,11 @@ def job_start(command: str | list[str], cwd: str | None = None, env: dict[str, s
                                   or dispatcher_binding["op_key"] != idempotency_key
                                   or dispatcher_binding["request_fingerprint"] != request_fingerprint):
         return {"ok": False, "error": "invalid_app_server_binding", "status": "unknown"}
+    try:
+        env_metadata.update(apply_codex_temp_default(command, working, job_id, env, child_env))
+    except OSError:
+        return {"ok": False, "job_id": job_id, "status": "failed",
+                "error": "codex_temp_default_unavailable: set explicit TEMP, TMP and TMPDIR or use a writable repository cwd"}
     directory = _directory(job_id, runtime_dir)
     if keyed:
         directory.parent.mkdir(parents=True, exist_ok=True)
@@ -475,18 +480,55 @@ def job_start(command: str | list[str], cwd: str | None = None, env: dict[str, s
 
 def _public_job_result(result: dict[str, Any]) -> dict[str, Any]:
     """Keep prompts and native app-server transport evidence private on disk."""
-    if result.get("transport") != APP_SERVER_TRANSPORT:
-        return result
     public = dict(result)
-    runtime = public.pop("app_server_runtime", {})
-    if isinstance(runtime, dict):
-        public["current_turn_id"] = runtime.get("current_turn_id")
-    spec = public.get("app_server")
-    if isinstance(spec, dict):
-        public["app_server"] = {key: value for key, value in spec.items() if key != "input_text"}
-    for key in ("journal_path", "steer_evidence", "steering", "native_thread_id", "native_turn_id", "connection_id", "rpc_id"):
-        public.pop(key, None)
-    return public
+    if result.get("transport") == APP_SERVER_TRANSPORT:
+        runtime = public.pop("app_server_runtime", {})
+        if isinstance(runtime, dict):
+            public["current_turn_id"] = runtime.get("current_turn_id")
+        spec = public.get("app_server")
+        if isinstance(spec, dict):
+            public["app_server"] = {key: value for key, value in spec.items() if key != "input_text"}
+        for key in ("journal_path", "steer_evidence", "steering", "native_thread_id", "native_turn_id", "connection_id", "rpc_id"):
+            public.pop(key, None)
+    # Bound each potentially large metadata value, including unknown future fields.
+    # Keep ordinary values intact; the full audit record remains on disk.
+    truncated = []
+    # Reserve space for identity and lifecycle fields before optional details.
+    priority = ("job_id", "status", "pid", "process_create_time", "worker_pid", "worker_create_time",
+                "process_identity", "worker_identity", "started_at", "finished_at", "exit_code",
+                "cwd", "stdout_path", "stderr_path", "worker_log_path", "runtime_dir",
+                "idempotency_key", "request_fingerprint", "dispatcher_request_fingerprint", "explicit_env_digest",
+                "git_at_start")
+    keys = [key for key in priority if key in public] + [key for key in public if key not in priority]
+    bounded, size_used = {}, 0
+    for key in keys:
+        value = public[key]
+        size = len(json.dumps(value, ensure_ascii=True).encode("utf-8"))
+        if key == "git_at_start" and isinstance(value, dict) and (size > 4096 or size_used + size > 16384):
+            summary = {}
+            used = 0
+            git_keys = ("head", "branch", "dirty", "repository_root")
+            for git_key in [k for k in git_keys if k in value] + [k for k in value if k not in git_keys]:
+                detail = value[git_key]
+                detail_size = len(json.dumps(detail, ensure_ascii=True).encode("utf-8"))
+                if detail_size > 512 or used + detail_size > 2048:
+                    summary[git_key] = {"truncated": True, "serialized_bytes": detail_size}
+                else:
+                    summary[git_key] = detail
+                    used += detail_size
+            value = summary
+            size = len(json.dumps(value, ensure_ascii=True).encode("utf-8"))
+            truncated.append(key)
+        if size > 4096 or size_used + size > 16384:
+            bounded[key] = {"truncated": True, "serialized_bytes": size}
+            if key not in truncated:
+                truncated.append(key)
+        else:
+            bounded[key] = value
+            size_used += size
+    if truncated:
+        bounded["metadata_truncated_fields"] = truncated
+    return bounded
 
 
 def job_status(job_id: str, runtime_dir: str | None = None) -> dict[str, Any]:
@@ -603,7 +645,9 @@ def job_stop(job_id: str, force: bool = True, timeout_sec: float = 10, runtime_d
         result.update(stop_result=stopped)
         if identity(result["pid"], result["process_create_time"]) == "missing":
             result.update(status="stopped", finished_at=time.time())
-            _save(directory / "metadata.json", result)
+            metadata = _read(directory / "metadata.json")
+            metadata.update(stop_result=stopped, status=result["status"], finished_at=result["finished_at"])
+            _save(directory / "metadata.json", metadata)
     return result
 
 
@@ -727,7 +771,16 @@ def job_list(runtime_dir: str | None = None, active_only: bool = False) -> dict[
                 items.append(item)
         except (ValueError, OSError) as exc:
             errors.append({"path": str(path), "error": str(exc)})
-    return {"jobs": sorted(items, key=lambda item: item["started_at"], reverse=True), "errors": errors}
+    items.sort(key=lambda item: item["started_at"], reverse=True)
+    # Limit aggregate metadata as well as each job; report omitted jobs explicitly.
+    selected, size = [], 0
+    for item in items:
+        item_size = len(json.dumps(item, ensure_ascii=True).encode("utf-8"))
+        if size + item_size > 512 * 1024:
+            break
+        selected.append(item)
+        size += item_size
+    return {"jobs": selected, "errors": errors, "jobs_omitted": len(items) - len(selected)}
 
 
 TOOLS = [job_start, job_status, job_tail, job_wait, job_stop, job_list, job_steer, job_steer_status]
