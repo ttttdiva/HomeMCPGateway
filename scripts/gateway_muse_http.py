@@ -37,6 +37,7 @@ from home_mcp_gateway.server import mcp as gateway_mcp  # noqa: E402
 
 DEFAULT_PREFIX = "/muse-mcp"
 ALLOWED_PREFIXES = ("/muse-mcp", "/claude-mcp")
+MUSE_BEARER_ONLY_PATH = "/muse-bearer/mcp"
 DEFAULT_PORT = 8765
 PATH_SECRET_RE = re.compile(r"[0-9A-Fa-f]{32,}\Z")
 AUDIT_PATH_CONTEXT: ContextVar[Path | None] = ContextVar("muse_gateway_audit_path", default=None)
@@ -296,6 +297,7 @@ def _authenticated_app(
     endpoint_path: str,
     token: str,
     audit_path: Path,
+    bearer_only_path: str | None = None,
 ) -> Any:
     expected = f"Bearer {token}".encode("ascii")
 
@@ -304,7 +306,8 @@ def _authenticated_app(
             await inner(scope, receive, send)
             return
 
-        if scope.get("path") != endpoint_path:
+        request_path = scope.get("path")
+        if request_path != endpoint_path and request_path != bearer_only_path:
             await _send_plain(send, 404, b"not found")
             return
 
@@ -316,6 +319,12 @@ def _authenticated_app(
         if len(values) != 1 or not hmac.compare_digest(values[0], expected):
             await _send_plain(send, 401, b"unauthorized")
             return
+
+        # Muse permits only one credential per outgoing HTTP request. The
+        # opt-in nonsecret alias retains Bearer authentication and delegates
+        # to the same MCP handler without redirecting or leaking the path key.
+        if request_path == bearer_only_path:
+            scope = {**scope, "path": endpoint_path, "raw_path": endpoint_path.encode("ascii")}
 
         context_token = AUDIT_PATH_CONTEXT.set(audit_path)
         try:
@@ -332,12 +341,15 @@ def build_app(
     *,
     audit_path: str | os.PathLike[str],
     prefix: str = DEFAULT_PREFIX,
+    enable_muse_bearer_only: bool = False,
 ) -> Any:
     """Build the protected HTTP app around the already-registered Gateway."""
     path_secret = _validate_path_secret(path_secret)
     bearer_token = _validate_token(bearer_token)
     if prefix not in ALLOWED_PREFIXES:
         raise ValueError("invalid_mcp_prefix")
+    if enable_muse_bearer_only and prefix != DEFAULT_PREFIX:
+        raise ValueError("muse_bearer_only_requires_muse_prefix")
     sink = Path(audit_path)
     if not _audit_sink_writable(sink):
         raise ValueError("audit_sink_unavailable")
@@ -356,6 +368,7 @@ def build_app(
         endpoint_path=endpoint_path,
         token=bearer_token,
         audit_path=sink,
+        bearer_only_path=MUSE_BEARER_ONLY_PATH if enable_muse_bearer_only else None,
     )
 
 
@@ -363,6 +376,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the authenticated Muse Gateway HTTP endpoint")
     parser.add_argument("--secret-dir", required=True, help="directory containing path.secret and token.secret")
     parser.add_argument("--prefix", choices=ALLOWED_PREFIXES, default=DEFAULT_PREFIX, help="distinct Muse or Claude HTTP MCP URL prefix")
+    parser.add_argument("--enable-muse-bearer-only", action="store_true", help="enable nonsecret Muse alias using Bearer auth only")
     parser.add_argument("--audit", default=None, help="JSONL tool audit file; defaults inside --secret-dir")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
@@ -384,7 +398,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     audit_path = Path(args.audit) if args.audit else secret_dir / "muse-full-gateway-audit.jsonl"
     if not audit_path.is_absolute():
         raise SystemExit("audit path must be absolute")
-    app = build_app(path_secret, bearer_token, audit_path=audit_path, prefix=args.prefix)
+    app = build_app(path_secret, bearer_token, audit_path=audit_path, prefix=args.prefix, enable_muse_bearer_only=args.enable_muse_bearer_only)
 
     import uvicorn
 

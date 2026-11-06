@@ -37,7 +37,7 @@ $ConsoleArgs = @{
     Port = $Port
     Python = $Python
     Entry = $Entry
-    ServerArguments = @('--secret-dir', $SecretsRoot, '--audit', $AuditPath, '--host', '127.0.0.1', '--port', "$Port")
+    ServerArguments = @('--secret-dir', $SecretsRoot, '--audit', $AuditPath, '--host', '127.0.0.1', '--port', "$Port", '--enable-muse-bearer-only')
     Log = $ServerLog
 }
 Invoke-HomeMcpHttpConsole @ConsoleArgs

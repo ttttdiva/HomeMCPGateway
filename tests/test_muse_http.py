@@ -460,3 +460,93 @@ def test_raw_http_json_responses_are_untransformed_and_length_delimited(tmp_path
     assert len(records) == 1
     assert records[0]["tool"] == "run_command"
     assert records[0]["result"] == "ok"
+
+
+def test_muse_bearer_only_alias_preserves_old_two_factor_endpoint(tmp_path):
+    audit_path = tmp_path / "alias-audit.jsonl"
+    app = muse_http.build_app(
+        PATH_SECRET,
+        BEARER_TOKEN,
+        audit_path=audit_path,
+        enable_muse_bearer_only=True,
+    )
+
+    async def check(legacy_url):
+        alias_url = legacy_url.replace(
+            f"/muse-mcp/{PATH_SECRET}/mcp",
+            muse_http.MUSE_BEARER_ONLY_PATH,
+        )
+        async with httpx.AsyncClient(timeout=10) as probe:
+            alias_missing = await probe.get(alias_url)
+            alias_invalid = await probe.get(
+                alias_url, headers={"Authorization": "Bearer invalid"}
+            )
+            old_missing = await probe.get(legacy_url)
+            old_invalid = await probe.get(
+                legacy_url, headers={"Authorization": "Bearer invalid"}
+            )
+        assert alias_missing.status_code == 401
+        assert alias_invalid.status_code == 401
+        assert old_missing.status_code == 401
+        assert old_invalid.status_code == 401
+
+        async with httpx2.AsyncClient(
+            headers={"Authorization": f"Bearer {BEARER_TOKEN}"}
+        ) as http_client:
+            async with streamable_http_client(
+                alias_url, http_client=http_client
+            ) as streams:
+                read_stream, write_stream = streams[:2]
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    listing = await session.list_tools()
+                    assert len(listing.tools) == len(
+                        await muse_http.gateway_mcp.list_tools()
+                    )
+                    result = await session.call_tool(
+                        "path_info", {"path": str(tmp_path)}
+                    )
+                    assert not result.is_error
+
+    with _running_server(app) as legacy_url:
+        _run(check(legacy_url))
+
+    records = [
+        json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(records) == 1
+    assert records[0]["tool"] == "path_info"
+    assert records[0]["result"] == "ok"
+    audit_contents = audit_path.read_text(encoding="utf-8")
+    assert BEARER_TOKEN not in audit_contents
+    assert PATH_SECRET not in audit_contents
+
+
+def test_muse_alias_is_opt_in_and_never_enabled_on_claude_prefix(tmp_path):
+    app = muse_http.build_app(
+        PATH_SECRET, BEARER_TOKEN, audit_path=tmp_path / "opt-in-audit.jsonl"
+    )
+
+    async def check(legacy_url):
+        alias_url = legacy_url.replace(
+            f"/muse-mcp/{PATH_SECRET}/mcp",
+            muse_http.MUSE_BEARER_ONLY_PATH,
+        )
+        async with httpx.AsyncClient(timeout=10) as probe:
+            response = await probe.get(
+                alias_url, headers={"Authorization": f"Bearer {BEARER_TOKEN}"}
+            )
+        assert response.status_code == 404
+
+    with _running_server(app) as legacy_url:
+        _run(check(legacy_url))
+    with pytest.raises(
+        ValueError, match="muse_bearer_only_requires_muse_prefix"
+    ):
+        muse_http.build_app(
+            PATH_SECRET,
+            BEARER_TOKEN,
+            audit_path=tmp_path / "claude-audit.jsonl",
+            prefix="/claude-mcp",
+            enable_muse_bearer_only=True,
+        )
