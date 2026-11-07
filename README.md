@@ -184,7 +184,7 @@ Stop-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
 
 ## AoiTalk（任意）
 
-AoiTalk tools は AoiTalk 専用 MCP 接続だけで公開されます。Phase B 以降、汎用 Gateway は Phase B 時点の83ツールに Dots 会話承認委任用1ツールを加えた **84 tools** を公開し、旧 `aoitalk_*` tools を登録しません。`HOME_MCP_AOITALK_ENABLED` はcatalogに影響しない無効な旧flagです。撤去した tool 名と offline catalog 契約は [Phase B の catalog 変更](docs/aoitalk-plugin.md) に記録しています。専用接続は **35 tools**（Clip 3、local task 5、API Agent 5、CLI session 8、管理14）を公開します。認証情報を ChatGPT に渡さないでください。
+AoiTalk tools は AoiTalk 専用 MCP 接続だけで公開されます。Phase B 以降、汎用 Gateway は現在 **92 tools** を公開し、旧 `aoitalk_*` tools を登録しません。`HOME_MCP_AOITALK_ENABLED` はcatalogに影響しない無効な旧flagです。撤去した tool 名と offline catalog 契約は [Phase B の catalog 変更](docs/aoitalk-plugin.md) に記録しています。専用接続は **35 tools**（Clip 3、local task 5、API Agent 5、CLI session 8、管理14）を公開します。認証情報を ChatGPT に渡さないでください。
 
 AoiTalk 自体と接続先・認証・必要な機能は別途設定が必要です。この Gateway は AoiTalk をインストールまたは設定しません。専用接続には、別途用意したTunnel IDを `.env` の `HOME_MCP_AOITALK_TUNNEL_ID` に設定し、必要なら `HOME_MCP_AOITALK_RUNTIME_API_KEY` に専用Restricted runtime keyを設定します。専用Tunnelの運用preflight後に `scripts\connect_tunnel.ps1 -Target aoitalk` を使います。既定alias/profileは `aoitalk`、状態とログは `.runtime\aoitalk\`、profileファイルは `.runtime\profiles\aoitalk.yaml` です。自動起動を登録する場合は `scripts\install_autostart.ps1 -Target aoitalk` を使い、既定TaskName `Home MCP Gateway - AoiTalk` を利用します。どちらのコマンドもTunnelを新規発行せず、GUIでのPlugin追加・Refreshは行いません。
 
@@ -193,13 +193,9 @@ AoiTalk 自体と接続先・認証・必要な機能は別途設定が必要で
 正準 Agent / Qwen route の選択、read-only stdio scope、接続・検証・OFFへの戻し方は
 [Agent 委譲の接続手順](docs/aoitalk-agent-delegation.md) を参照してください。
 
-## Dots 会話承認委任（任意）
-
-Dotsが会話上で求める作業承認・方針選択を、ユーザーから事前に委任された判断を返す `user_conversation` を追加しました。内部では別モジュールのGPT-5.6 Luna Highが回答を生成します。ユーザーが指定する固定文章は `.local/dots_user_reply_suffix.txt` から毎回読み込み、生成文末にそのまま追記します。設定・導入・正確な権限境界は [Dots 会話承認委任 MCP](docs/dots-conversation-delegate.md) を参照してください。
-
 ## ツールの概要
 
-汎用 Gateway は84ツール（従来83＋Dots会話承認委任1）です。主なグループは次のとおりです。
+汎用 Gateway は92ツールです。主なグループは次のとおりです。
 
 | グループ | 主な内容 |
 | --- | --- |
@@ -212,9 +208,17 @@ Dotsが会話上で求める作業承認・方針選択を、ユーザーから�
 
 ログイン済みEdgeの既存プロファイル・タブを明示選択して利用する方法は、[既存Edge接続ガイド](docs/browser-edge-attach.ja.md)を参照してください。
 
-別接続の AoiTalk 専用MCPは35 tools（Clip 3、local task 5、API Agent 5、CLI session 8、管理14）を公開します。このcatalogは汎用Gatewayの84 toolsには含まれません。
+別接続の AoiTalk 専用MCPは35 tools（Clip 3、local task 5、API Agent 5、CLI session 8、管理14）を公開します。このcatalogは汎用Gatewayの92 toolsには含まれません。
 
 これらのグループにもアクセス制限や read-only 境界が追加されるわけではありません。接続相手とプロンプトを信頼できる範囲に限定してください。
+
+## ジョブの環境と Codex の WindowsApps エイリアス
+
+長時間ジョブの子プロセス環境は、親環境を allowlist で絞り、ジョブが明示した `env` を重ねて作ります。公式 Codex を直接起動するジョブでは、既定で PATH は変更せず、`Microsoft\WindowsApps` 配下に `pwsh` のエイリアスが存在するかだけをジョブのメタデータに診断記録します（PATH の内容自体は記録しません）。
+
+Codex が WindowsApps の `pwsh` エイリアスを選んで起動に失敗する環境では、そのジョブの明示 `env` に `HOME_MCP_CODEX_WINDOWSAPPS_POLICY=exclude_alias` を指定してください。指定したジョブの子環境でのみ、エイリアスが存在する `Microsoft\WindowsApps` の PATH エントリを除外します。親プロセスの環境、OS の設定、権限や認証は変更しません。除外後に正規の PowerShell 7（`pwsh.exe`）または Windows PowerShell 5.1（`powershell.exe`）の候補が残っていない場合、そのジョブは起動せず明示的に失敗します。
+
+この設定は指定したジョブの子環境だけに適用されます。その子プロセスから他の WindowsApps エイリアス（ストアアプリ等）を名前で起動する必要があるジョブには適しません。その場合はこの設定を指定しないでください。親環境に同じ変数があっても、ジョブの明示 `env` に指定しなければ除外は行われません。
 
 ## トラブルシューティング
 

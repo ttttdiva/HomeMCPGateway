@@ -35,7 +35,7 @@ FULL_MCP_BASELINE = {
     "browser_capture_frames_stop", "browser_track_boxes_start", "browser_track_boxes_stop", "browser_detach",
     "browser_run_plan", "browser_navigate", "browser_page_text",
     "browser_find", "browser_click", "browser_fill", "browser_keyboard", "browser_screenshot",
-    "browser_errors", "browser_close", "image_library_register_context", "user_conversation",
+    "browser_errors", "browser_close", "image_library_register_context",
 }
 
 AOITALK_TOOLS = {fn.__name__ for fn in (

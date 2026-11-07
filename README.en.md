@@ -180,7 +180,7 @@ Stop-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
 
 ## AoiTalk (optional)
 
-AoiTalk tools are exposed only through the dedicated AoiTalk MCP connection. Since Phase B, the generic Gateway now exposes **84 tools** (the original 83 plus the Dots conversational delegation tool) and no longer registers the old `aoitalk_*` tools; `HOME_MCP_AOITALK_ENABLED` is an inactive legacy flag and does not affect its catalog. [The Phase B catalog change](docs/aoitalk-plugin.md) records the removed tool names and the offline catalog contract. The dedicated connection exposes **35 tools** (3 Clip, 5 local task, 5 API Agent, 8 CLI session, and 14 management tools). Never send AoiTalk credentials to ChatGPT.
+AoiTalk tools are exposed only through the dedicated AoiTalk MCP connection. Since Phase B, the generic Gateway now exposes **92 tools** and no longer registers the old `aoitalk_*` tools; `HOME_MCP_AOITALK_ENABLED` is an inactive legacy flag and does not affect its catalog. [The Phase B catalog change](docs/aoitalk-plugin.md) records the removed tool names and the offline catalog contract. The dedicated connection exposes **35 tools** (3 Clip, 5 local task, 5 API Agent, 8 CLI session, and 14 management tools). Never send AoiTalk credentials to ChatGPT.
 
 AoiTalk and its endpoint, authentication, and required features must be configured separately. This gateway does not install or configure AoiTalk. Configure a separately provisioned Tunnel ID in `HOME_MCP_AOITALK_TUNNEL_ID`; optionally set a dedicated Restricted runtime key in `HOME_MCP_AOITALK_RUNTIME_API_KEY`. After the separate tunnel preflight, use `scripts\connect_tunnel.ps1 -Target aoitalk`. Its alias/profile is `aoitalk`, status and logs live under `.runtime\aoitalk\`, and its profile is `.runtime\profiles\aoitalk.yaml`. To register its separate autostart task, use `scripts\install_autostart.ps1 -Target aoitalk`; the default task name is `Home MCP Gateway - AoiTalk`. These commands do not create a Tunnel or add/refresh a plugin in the GUI.
 
@@ -188,7 +188,7 @@ See [the dedicated AoiTalk MCP guide](docs/aoitalk-plugin.md) for its tools, ope
 
 ## Tool groups
 
-The generic Gateway exposes 84 tools (including the Dots conversational delegate). The main groups are:
+The generic Gateway exposes 92 tools. The main groups are:
 
 | Group | Examples |
 | --- | --- |
@@ -199,7 +199,7 @@ The generic Gateway exposes 84 tools (including the Dots conversational delegate
 | Development workflows | Git repositories / worktrees, persistent jobs, and browser sessions (Playwright) |
 | Images and diagnostics | Image context plus local tool-timing diagnostics |
 
-The separate AoiTalk MCP connection exposes 35 tools (3 Clip, 5 local task, 5 API Agent, 8 CLI session, and 14 management tools). They are not included in the generic Gateway's 79-tool catalog.
+The separate AoiTalk MCP connection exposes 35 tools (3 Clip, 5 local task, 5 API Agent, 8 CLI session, and 14 management tools). They are not included in the generic Gateway's 92-tool catalog.
 
 These groups do not create an allowlist or a read-only boundary. Limit connections and prompts to people and workflows you trust.
 

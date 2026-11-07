@@ -38,7 +38,7 @@ async def check():
     from home_mcp_gateway import server
     tools = await server.mcp.list_tools()
     names = [tool.name for tool in tools]
-    assert names == contract["generic_names"] + ["user_conversation"], names
+    assert names == contract["generic_names"], names
     assert not any(name.startswith("aoitalk_") for name in names)
     assert {"job_start", "job_status", "job_tail", "job_wait", "job_stop",
             "job_list", "job_steer", "job_steer_status"} <= set(names)
@@ -94,7 +94,7 @@ class GenericAoiTalkBoundaryTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 evidence = json.loads(result.stdout)
-                self.assertEqual(evidence["names"], expected["generic_names"] + ["user_conversation"])
+                self.assertEqual(evidence["names"], expected["generic_names"])
                 self.assertEqual(evidence["aoi_modules"], [])
                 self.assertEqual(evidence["cleanup_paths"], 2)
 
