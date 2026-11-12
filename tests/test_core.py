@@ -13,6 +13,20 @@ from home_mcp_gateway import core
 
 
 class CoreTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows child environment")
+    def test_codex_command_environment_only_changes_its_own_path(self):
+        with patch.dict(os.environ, {"PATH": "inherited"}, clear=False):
+            before = dict(os.environ)
+            with patch("home_mcp_gateway.job_environment.apply_codex_windowsapps_policy") as policy:
+                child = core._command_env("codex exec", {"Path": "explicit"})
+                policy.assert_called_once()
+                self.assertEqual([v for k, v in child.items() if k.upper() == "PATH"], ["explicit"])
+                policy.reset_mock()
+                other = core._command_env("claude codex", {})
+                policy.assert_not_called()
+                self.assertEqual(other["PATH"], "inherited")
+            self.assertEqual(dict(os.environ), before)
+
     def test_file_roundtrip_and_hash(self):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "a" / "hello.txt"

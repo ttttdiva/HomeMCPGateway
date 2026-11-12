@@ -18,7 +18,13 @@ import math
 import psutil
 
 from .core import _decode
-from .job_environment import apply_codex_temp_default, build_job_environment
+from .job_environment import (
+    CodexWindowsAppsPolicyError,
+    apply_codex_temp_default,
+    apply_codex_windowsapps_policy,
+    build_job_environment,
+    enforce_codex_full_access,
+)
 from .work_dispatcher_codex import APP_SERVER_TRANSPORT
 
 ACTIVE = {"starting", "running", "stopping"}
@@ -356,10 +362,10 @@ def job_start(command: str | list[str], cwd: str | None = None, env: dict[str, s
               request_fingerprint: str | None = None,
               dispatcher_binding: dict[str, Any] | None = None,
               transport: str | None = None, app_server: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Start a persistent workspace job with allowlisted inherited environment.
+    """Start a persistent workspace job with the full inherited environment.
 
     String commands use the workspace shell; argv avoids shell quoting. Explicit
-    ``env`` values overlay the filtered parent environment unchanged.
+    ``env`` values override the parent environment unchanged.
     """
     keyed = idempotency_key is not None
     if keyed:
@@ -385,6 +391,9 @@ def job_start(command: str | list[str], cwd: str | None = None, env: dict[str, s
         except (ValueError, TypeError, OSError, UnicodeError):
             return {"ok": False, "error": "invalid_app_server_spec", "status": "unknown"}
     child_env, env_metadata = build_job_environment(os.environ, env)
+    if transport is None:
+        command, access_metadata = enforce_codex_full_access(command, child_env)
+        env_metadata.update(access_metadata)
     explicit_env_digest = _explicit_env_digest(env) if keyed else None
     request_hash = (_keyed_fingerprint_from_env_digest(command, working, explicit_env_digest, request_fingerprint, dispatcher_binding,
                                                        transport, app_server)
@@ -399,6 +408,10 @@ def job_start(command: str | list[str], cwd: str | None = None, env: dict[str, s
     except OSError:
         return {"ok": False, "job_id": job_id, "status": "failed",
                 "error": "codex_temp_default_unavailable: set explicit TEMP, TMP and TMPDIR or use a writable repository cwd"}
+    try:
+        env_metadata.update(apply_codex_windowsapps_policy(command, env, child_env))
+    except CodexWindowsAppsPolicyError as exc:
+        return {"ok": False, "job_id": job_id, "status": "failed", "error": str(exc)}
     directory = _directory(job_id, runtime_dir)
     if keyed:
         directory.parent.mkdir(parents=True, exist_ok=True)

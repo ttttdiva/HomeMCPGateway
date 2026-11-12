@@ -84,6 +84,23 @@ def _env(extra: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+def _command_env(command: str | list[str], extra: dict[str, str] | None) -> dict[str, str]:
+    from .job_environment import _is_codex_launch, apply_codex_windowsapps_policy
+
+    child = _env(extra)
+    if os.name == "nt" and _is_codex_launch(command, child):
+        # Explicit Path must replace the inherited PATH case-insensitively.
+        explicit_paths = [(k, v) for k, v in (extra or {}).items() if str(k).upper() == "PATH"]
+        explicit_path = explicit_paths[-1] if explicit_paths else None
+        if explicit_path is not None:
+            for key in list(child):
+                if key.upper() == "PATH":
+                    del child[key]
+            child[str(explicit_path[0])] = str(explicit_path[1])
+        apply_codex_windowsapps_policy(command, extra, child)
+    return child
+
+
 def system_info() -> dict[str, Any]:
     vm = psutil.virtual_memory()
     disks = []
@@ -1550,7 +1567,7 @@ def _run(
         proc = subprocess.Popen(
             command,
             cwd=str(Path(cwd).expanduser()) if cwd else None,
-            env=_env(env),
+            env=_command_env(command, env),
             shell=shell,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1645,7 +1662,7 @@ def start_process(command: str, cwd: str | None = None, env: dict[str, str] | No
     proc = subprocess.Popen(
         command,
         cwd=str(Path(cwd).expanduser()) if cwd else None,
-        env=_env(env),
+        env=_command_env(command, env),
         shell=True,
         stdin=subprocess.DEVNULL,
         stdout=stdout_f,

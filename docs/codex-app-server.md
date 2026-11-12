@@ -215,3 +215,48 @@ validated installed paths. Poll that job for its active turn ID, submit one
 synthetic `job_steer` body, and read the matching `job_steer_status` receipt. Any
 live execution, enabling/configuration and restart needed to load this source
 require a separate instruction; none is performed by this offline task.
+
+## Windows Codex shell selection
+
+Gateway job launches, including the dispatcher and app-server, and direct
+Codex commands submitted through `run_command` or `start_process`, apply a
+Windows-only child PATH policy. A `pwsh.exe` in a known WindowsApps alias or
+package directory, including PowerShell MSIX paths and resolved links into
+them, is unsafe; access errors and other indeterminate lookups are unsafe too.
+A confirmed missing `pwsh.exe` leaves the directory available for other aliases.
+A nonempty, regular `pwsh.exe` outside those locations is preferred
+ahead of them. If no such PowerShell 7 is available, unsafe PATH entries are
+removed and the child's SystemRoot `System32/WindowsPowerShell/v1.0` directory
+must provide `powershell.exe` on PATH. An absent verified
+candidate produces an explicit launch error. No Windows user or system
+environment setting is changed. File existence and path resolution are not
+proof that a shell can actually run in the Codex sandbox.
+
+The fallback removal also hides all other executable aliases in those entries
+from the Codex process and its descendants. Install a usable PowerShell 7
+outside WindowsApps to preserve those aliases, or use a CLI's real executable
+outside the removed directory. Moving a PowerShell 7 directory to the front can
+also change which other programs in that directory take precedence. The
+Gateway cannot remove one filename from a
+PATH directory. Explicit job environment policy `exclude_alias` retains its
+previous forced-removal behavior, including its legacy non-WindowsApps shell
+candidate rule; explicit `off`, `diagnose`, and other values
+retain the previous diagnose-only behavior. This is a compatibility opt-out,
+not a guarantee of a usable shell. A policy value inherited from the Gateway
+process does not override automatic selection. For recognized Codex commands,
+duplicate case-insensitive PATH keys collapse to one, using the last explicit
+value if provided, otherwise the last child value. Fully qualified `%NAME%`
+entries use the child environment for expansion and are emitted in the same
+expanded form used for inspection. Relative, drive-relative, root-relative,
+empty and unresolved entries are preserved but never used to verify a shell;
+the Gateway process's working directory is not used to resolve them.
+
+Recognized commands are bare `codex`, `codex.exe`, `codex.cmd`, `codex.bat`,
+the official native and Node entrypoints, and the npm shim under the child's
+`APPDATA/npm`, in argv or simple command strings. An arbitrary absolute file
+named `codex.exe` is not classified by its name alone. Shell
+compound commands, variable expansions and Codex invoked inside PowerShell,
+Python, or another wrapper cannot be identified as Codex-only launches and do
+not receive this policy. Use a direct command for these routes. This is not a
+guarantee about a future Codex version's shell lookup behavior; regression
+testing must include an actual sandboxed shell after updates.

@@ -214,11 +214,13 @@ AoiTalk 自体と接続先・認証・必要な機能は別途設定が必要で
 
 ## ジョブの環境と Codex の WindowsApps エイリアス
 
-長時間ジョブの子プロセス環境は、親環境を allowlist で絞り、ジョブが明示した `env` を重ねて作ります。公式 Codex を直接起動するジョブでは、既定で PATH は変更せず、`Microsoft\WindowsApps` 配下に `pwsh` のエイリアスが存在するかだけをジョブのメタデータに診断記録します（PATH の内容自体は記録しません）。
+長時間ジョブの子プロセス環境は親環境をすべて継承し、ジョブが明示した `env` を重ねて作ります（環境変数の許可リスト・秘密情報の自動除外は適用しません）。Windows では、Gateway の直接 Codex 起動（`job_start`、dispatcher、app-server、`run_command`、`start_process`）に、子プロセス専用の PATH 補正を既定で適用します。公式 native / Node、bare CLI と npm shim の直接起動が対象です。複合 shell コマンドや任意ラッパー内の起動は自動判定できません。
 
-Codex が WindowsApps の `pwsh` エイリアスを選んで起動に失敗する環境では、そのジョブの明示 `env` に `HOME_MCP_CODEX_WINDOWSAPPS_POLICY=exclude_alias` を指定してください。指定したジョブの子環境でのみ、エイリアスが存在する `Microsoft\WindowsApps` の PATH エントリを除外します。親プロセスの環境、OS の設定、権限や認証は変更しません。除外後に正規の PowerShell 7（`pwsh.exe`）または Windows PowerShell 5.1（`powershell.exe`）の候補が残っていない場合、そのジョブは起動せず明示的に失敗します。
+Gateway の直接 Codex exec ジョブは、起動側が `--sandbox workspace-write` / `--approve-for-me` などを指定しても、明示的に `--dangerously-bypass-approvals-and-sandbox` へ統一し、シェル環境変数を全継承します。Codex 以外・app-server 起動・複合シェル内の Codex は変更しません。フルアクセスでは Codex にWindowsユーザーと同等のファイル・ネットワーク操作権限が与えられます。
 
-この設定は指定したジョブの子環境だけに適用されます。その子プロセスから他の WindowsApps エイリアス（ストアアプリ等）を名前で起動する必要があるジョブには適しません。その場合はこの設定を指定しないでください。親環境に同じ変数があっても、ジョブの明示 `env` に指定しなければ除外は行われません。
+WindowsApps の PowerShell alias や MSIX を避け、利用可能な非パッケージ版 PowerShell 7 を優先します。候補がなければ問題の PATH エントリを除外し、System32 の Windows PowerShell 5.1 にフォールバックします。必要な shell を確認できない場合は明示的に起動エラーになります。ファイルが存在しないと確認できた WindowsApps エントリは残します。PATH エントリを除外すると、その中の他のアプリも Codex と子プロセスから名前で起動できなくなります。PowerShell 7 を優先すると、そのディレクトリ内の他のコマンドの優先順位も変わることがあります。
+
+互換性のため、ジョブの明示 `env` で `HOME_MCP_CODEX_WINDOWSAPPS_POLICY=exclude_alias` を指定すると従来の強制除外、`off` または `diagnose` を指定すると従来の診断専用動作になります。明示されない場合は自動補正されます。Claude、Grok、Agy などの非 Codex 起動と Windows のユーザー・システム環境変数は変更しません。詳細と対象外の起動形は [Codex の Windows shell 選択](docs/codex-app-server.md#windows-codex-shell-selection)を参照してください。
 
 ## トラブルシューティング
 

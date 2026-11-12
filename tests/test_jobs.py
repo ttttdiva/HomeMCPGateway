@@ -126,20 +126,84 @@ class JobTests(unittest.TestCase):
         self.assertEqual(jobs.job_wait(job["job_id"], 10, self.runtime)["exit_code"], 0)
         output = json.loads(jobs.job_tail(job["job_id"], runtime_dir=self.runtime)["stdout"])
         self.assertTrue(output["explicit_present"])
-        self.assertFalse(output["dummy_key_present"])
+        self.assertTrue(output["dummy_key_present"])
         self.assertTrue(output["path_present"])
         self.assertFalse((jobs._directory(job["job_id"], self.runtime) / "startup.env.dpapi").exists())
         metadata_path = jobs._directory(job["job_id"], self.runtime) / "metadata.json"
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        self.assertEqual(metadata["env_policy"], "allowlist-v1")
+        self.assertEqual(metadata["env_policy"], "inherit-all")
         self.assertGreater(metadata["env_inherited_count"], 0)
-        self.assertGreater(metadata["env_dropped_count"], 0)
-        self.assertIn("DUMMY_API_KEY", metadata["env_dropped_secret_like_names"])
+        self.assertEqual(metadata["env_dropped_count"], 0)
+        self.assertEqual(metadata["env_dropped_secret_like_names"], [])
         serialized_metadata = metadata_path.read_text(encoding="utf-8")
         self.assertNotIn("unique-parent-key-sentinel", serialized_metadata)
         self.assertNotIn("unique-explicit-env-sentinel", serialized_metadata)
         if os.name == "nt":
             self.assertEqual(metadata["launch_method"], "windows_interactive_task")
+
+    def _codex_command(self):
+        return [str(Path(self.runtime) / "node_modules" / "@openai" / "codex-win32-x64" / "vendor"
+                    / "x86_64-pc-windows-msvc" / "bin" / "codex.exe"), "exec"]
+
+    def _windowsapps_dirs(self):
+        root = Path(self.runtime) / "windowsapps-fixture"
+        alias_dir = root / "Users" / "qa" / "AppData" / "Local" / "Microsoft" / "WindowsApps"
+        alias_dir.mkdir(parents=True)
+        (alias_dir / "pwsh.exe").write_bytes(b"alias-stub")
+        shell_dir = root / "Program Files" / "PowerShell" / "7"
+        shell_dir.mkdir(parents=True)
+        (shell_dir / "pwsh.exe").write_bytes(b"real-shell")
+        return alias_dir, shell_dir
+
+    def test_codex_windowsapps_policy_without_powershell_fails_before_launch(self):
+        alias_dir, _ = self._windowsapps_dirs()
+        with patch.dict(os.environ, {"PATH": str(alias_dir)}, clear=False):
+            before = dict(os.environ)
+            result = jobs.job_start(self._codex_command(), cwd=self.runtime,
+                                    env={"HOME_MCP_CODEX_WINDOWSAPPS_POLICY": "exclude_alias"},
+                                    runtime_dir=self.runtime)
+            self.assertEqual(dict(os.environ), before)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("codex_windowsapps_powershell_unavailable", result["error"])
+        self.assertNotIn(str(alias_dir), json.dumps(result))
+        self.assertFalse(jobs._directory(result["job_id"], self.runtime).exists())
+
+    def test_codex_windowsapps_policy_in_parent_environment_does_not_override_default(self):
+        alias_dir, _ = self._windowsapps_dirs()
+        inherited_path = ";".join([str(alias_dir), os.environ.get("PATH", "")])
+        with patch.dict(os.environ, {"PATH": inherited_path,
+                                     "HOME_MCP_CODEX_WINDOWSAPPS_POLICY": "exclude_alias"}, clear=False):
+            before = dict(os.environ)
+            result = jobs.job_start(self._codex_command(), cwd=self.runtime, env={"QA_EXPLICIT": "one"},
+                                    runtime_dir=self.runtime)
+            self.assertEqual(dict(os.environ), before)
+        self.assertNotIn("codex_windowsapps_powershell_unavailable", json.dumps(result))
+        self.ids.append(result["job_id"])
+        metadata = jobs._read(jobs._directory(result["job_id"], self.runtime) / "metadata.json")
+        self.assertIn(metadata["codex_windowsapps_policy"], ("prefer_pwsh", "exclude_alias"))
+        self.assertTrue(metadata["codex_windowsapps_alias_present"])
+
+    def test_keyed_codex_windowsapps_job_replays_without_duplicate_launch(self):
+        alias_dir, shell_dir = self._windowsapps_dirs()
+        key = "wd2:codex_windowsapps:" + "f" * 64
+        fingerprint = hashlib.sha256(b"codex windowsapps replay").hexdigest()
+        env = {"HOME_MCP_CODEX_WINDOWSAPPS_POLICY": "exclude_alias"}
+        path_value = ";".join([str(alias_dir), str(shell_dir), os.environ.get("PATH", "")])
+        with patch.dict(os.environ, {"PATH": path_value}, clear=False):
+            first = jobs.job_start(self._codex_command(), cwd=self.runtime, env=env, runtime_dir=self.runtime,
+                                   idempotency_key=key, request_fingerprint=fingerprint)
+            second = jobs.job_start(self._codex_command(), cwd=self.runtime, env=env, runtime_dir=self.runtime,
+                                    idempotency_key=key, request_fingerprint=fingerprint)
+        self.assertEqual(env, {"HOME_MCP_CODEX_WINDOWSAPPS_POLICY": "exclude_alias"})
+        self.assertEqual(second["job_id"], first["job_id"])
+        self.assertNotIn("idempotency_conflict", second)
+        self.ids.append(first["job_id"])
+        self.assertEqual(len(list((Path(self.runtime) / "jobs").iterdir())), 1)
+        metadata = jobs._read(jobs._directory(first["job_id"], self.runtime) / "metadata.json")
+        self.assertEqual(metadata["codex_windowsapps_policy"], "exclude_alias")
+        self.assertGreaterEqual(metadata["codex_windowsapps_alias_entries_removed"], 1)
+        self.assertEqual(metadata["codex_windowsapps_powershell_candidate"], "pwsh")
 
     def test_scheduler_environment_missing_fails_closed(self):
         from home_mcp_gateway.windows_job_launch import consume_environment
