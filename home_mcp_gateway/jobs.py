@@ -779,6 +779,13 @@ def job_list(runtime_dir: str | None = None, active_only: bool = False) -> dict[
     items, errors = [], []
     for path in (runtime_root(runtime_dir) / "jobs").glob("*/metadata.json"):
         try:
+            if active_only:
+                try:
+                    metadata = _read(_directory(path.parent.name, runtime_dir) / "metadata.json")
+                except FileNotFoundError:
+                    metadata = {}  # Let job_status handle an incomplete reservation.
+                if metadata.get("status") in {"exited", "failed", "stopped"}:
+                    continue
             item = job_status(path.parent.name, runtime_dir)
             if not active_only or item["status"] in ACTIVE:
                 items.append(item)

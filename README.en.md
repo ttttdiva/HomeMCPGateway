@@ -2,232 +2,112 @@
 
 # Home MCP Gateway
 
-Home MCP Gateway connects a local MCP server on a Windows PC to ChatGPT through OpenAI Secure MCP Tunnel, exposing local file, process, network, and desktop operations as MCP tools.
+**A tunnel MCP server that lets cloud AI (ChatGPT / Claude Code and claude.ai / Muse) operate your home Windows PC through MCP tools.**
 
-> **Important warning:** This gateway has unrestricted access to the local files, processes, network, and desktop available to the Windows user who runs it. Use it only through a trusted private tunnel. Do not expose it to the public internet or untrusted users.
+The PC runs one Gateway (92 tools), and each AI service registers it as its own connector (plugin). No inbound ports need to be opened.
 
-## Requirements
-
-- Windows
-- Python 3.10 or newer
-- An eligible OpenAI / ChatGPT workspace with access to Tunnel and Developer mode
-- PowerShell to run the setup scripts
-
-## PC-side setup
-
-1. Clone or download the public repository.
-
-   ```powershell
-   git clone https://github.com/ttttdiva/HomeMCPGateway
-   Set-Location HomeMCPGateway
-   ```
-
-   Without Git, use **Code → Download ZIP** at the same [public repository](https://github.com/ttttdiva/HomeMCPGateway), then use the extracted folder as the working folder.
-
-2. Create the virtual environment, install dependencies, and run the setup checks.
-
-   ```powershell
-   .\scripts\setup_windows.ps1
-   ```
-
-3. Download the official [tunnel-client release](https://github.com/openai/tunnel-client/releases/latest). Use the complete Windows **amd64 or arm64 ZIP**; the runtime-only ZIP is not sufficient. Extract `tunnel-client.exe` to a location on `PATH`, to an extracted folder under this repository, or set its full path in `.env` as `TUNNEL_CLIENT_PATH`. Optionally verify the download with the release's `SHA256SUMS.txt` file.
-
-4. Open the [OpenAI Organization Tunnels settings](https://platform.openai.com/settings/organization/tunnels). Create or inspect a tunnel and associate it with the ChatGPT workspace that will use it. Keep these three values distinct:
-
-   - **Tunnel ID** identifies the tunnel. It is not a secret; put it in `.env` as `CONTROL_PLANE_TUNNEL_ID`.
-   - **Runtime API key** is the Restricted API key used by `tunnel-client.exe` at runtime. Create it in the next step and store it only in `.env` as `CONTROL_PLANE_API_KEY`.
-   - **Admin key** is organization-level administrative authorization for creating, changing, or inspecting tunnels. It is not a runtime key and must not be put in `.env` or ChatGPT.
-
-5. At [Organization API keys](https://platform.openai.com/settings/organization/api-keys), create a **Restricted** runtime API key with **Tunnels: Read** and **Tunnels: Use** permissions. The key is shown only once, so store it securely at creation time. Do not substitute an admin key.
-
-6. Copy the environment template and fill in its placeholders.
-
-   ```powershell
-   Copy-Item .env.example .env
-   ```
-
-   At minimum, set:
-
-   ```dotenv
-   CONTROL_PLANE_TUNNEL_ID=<your-tunnel-id>
-   CONTROL_PLANE_API_KEY=<your-restricted-runtime-api-key>
-   TUNNEL_ALIAS=home-mcp
-   # TUNNEL_CLIENT_PATH=<full-path-to-tunnel-client.exe>
-   ```
-
-   Set `TUNNEL_CLIENT_PATH` only when the executable is not found on `PATH` or by the repository-folder search. Keep `.env`, the Tunnel ID, and the runtime API key out of Git, ChatGPT messages, and app configuration.
-
-7. Check the initial connection and create the profile. Foreground tunnel startup is described below.
-
-   ```powershell
-   .\scripts\connect_tunnel.ps1
-   ```
-
-   The script starts the local runtime named `home-mcp`, checks `process_running`, `healthy`, and `ready`, then returns to the prompt. It does not open a tunnel window. The connection is outbound; no inbound firewall port is required.
-
-## ChatGPT-side setup
-
-1. Enable **Developer mode** in ChatGPT.
-2. Open the app / connector creation flow and choose **Tunnel** as the connection type.
-3. Select the tunnel you created or inspected, or paste its Tunnel ID. Choose **No authentication**. The runtime API key is used only between the local tunnel client and OpenAI; ChatGPT never receives it.
-4. Review the tools, create the app / connector, and connect while the local runtime reports `ready`.
-
-See the official [Connect ChatGPT to a remote MCP server guide](https://developers.openai.com/plugins/deploy/connect-chatgpt), [Refresh MCP metadata instructions](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata), and [Using Projects in ChatGPT help article](https://help.openai.com/en/articles/10169521-using-projects-in-chatgpt).
-
-## Normal startup, restart, and windows
-
-### Run the tunnel itself in a visible console
-
-**Use `tunnel-client.exe run` to run the tunnel itself in your PowerShell console.** `runtimes connect` starts or reuses a separately managed process. A visible `connect_tunnel.ps1 -Watch` window belongs to the monitor, not the foreground tunnel process.
-
-The following assumes the initial connection has created `.runtime\profiles\home-mcp.yaml`. First stop the existing monitor and runtime for the same tunnel, using the background-mode stop instructions below. Then open a dedicated PowerShell at the repository root; do not run both modes concurrently.
-
-The existing profile references `env:CONTROL_PLANE_API_KEY`. `run` does not load the repository's `.env`, and `connect_tunnel.ps1` restores its caller's environment when it exits. The following uses the existing script's literal `.env` loading behavior without printing secrets or placing their values in arguments, and restores the environment on exit:
-
-Set the installation directory inside the newly opened PowerShell itself. The path below is this PC's example; change the `$GatewayRoot` line to the actual absolute installation path elsewhere.
-
-```powershell
-$GatewayRoot = 'D:\Dev\80_HomeMCPGateway'
-Set-Location -LiteralPath $GatewayRoot
-if (-not (Test-Path -LiteralPath (Join-Path $GatewayRoot '.env') -PathType Leaf)) { throw 'Gateway .env not found.' }
-$GatewaySavedEnv = @{}
-try {
-    foreach ($Line in [IO.File]::ReadAllLines((Join-Path $GatewayRoot '.env'))) {
-        $Entry = $Line.Trim()
-        if (-not $Entry -or $Entry.StartsWith('#')) { continue }
-        if ($Entry -notmatch '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') { throw 'Invalid .env assignment.' }
-        $Name = $Matches[1]
-        $Value = $Matches[2].Trim()
-        if ($Value.Length -ge 2 -and (($Value.StartsWith('"') -and $Value.EndsWith('"')) -or ($Value.StartsWith("'") -and $Value.EndsWith("'")))) {
-            $Value = $Value.Substring(1, $Value.Length - 2)
-        }
-        if (-not $GatewaySavedEnv.ContainsKey($Name)) {
-            $GatewaySavedEnv[$Name] = [Environment]::GetEnvironmentVariable($Name, 'Process')
-        }
-        [Environment]::SetEnvironmentVariable($Name, $Value, 'Process')
-    }
-    $TunnelClient = $env:TUNNEL_CLIENT_PATH
-    if (-not $TunnelClient) {
-        $TunnelClient = (Get-ChildItem -Path (Join-Path $GatewayRoot 'tunnel-client-*\tunnel-client.exe') -File |
-            Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
-    }
-    if (-not $TunnelClient -or -not (Test-Path -LiteralPath $TunnelClient -PathType Leaf)) { throw 'Set TUNNEL_CLIENT_PATH in .env.' }
-    if (-not $env:CONTROL_PLANE_API_KEY) { throw 'CONTROL_PLANE_API_KEY is required.' }
-    & $TunnelClient run --profile-dir (Join-Path $GatewayRoot '.runtime\profiles') --profile home-mcp --log.file=
-} finally {
-    foreach ($Name in $GatewaySavedEnv.Keys) {
-        [Environment]::SetEnvironmentVariable($Name, $GatewaySavedEnv[$Name], 'Process')
-    }
-}
+```text
+ChatGPT        ── OpenAI Secure MCP Tunnel ──┐
+Claude Code ─┐                               ├─> Home MCP Gateway ─> Windows PC
+claude.ai   ─┴─ HTTPS (e.g. Cloudflare Tunnel)┤   (files / commands / browser /
+Muse           ── HTTPS (e.g. Cloudflare Tunnel)┘    desktop / Git / Android ...)
 ```
 
-This PowerShell is the tunnel's console. The existing profile logs to a file; use the empty value `--log.file=` for standard output. Do not use `--log.file stdout`: it creates a file named `stdout`. Press Ctrl+C to end the foreground run, then repeat the procedure to reload `.env` and restart. Do not add the secret value to the command. For a different profile name or authentication variable, follow that profile's references.
+> **Warning:** The Gateway has **unrestricted** access to files, processes, network, and desktop with the permissions of the running Windows user. Use it only over private connections that you alone use, and never share its URLs or tokens.
 
-A direct `run` is not a `runtimes`-managed launch. Do not treat an old managed `stopped` status or `.runtime\supervisor-status.json` as the foreground process's liveness. Check its console and health URL instead. The browser management page is `/ui` under that health URL; the profile's `health.url_file` specifies where the latest URL is written.
+## What it can do
 
-### Hidden background operation
+Just ask in chat, and the AI does things like this on your home PC:
 
-If a visible tunnel console is unnecessary and autostart is configured, use the existing `80_HomeMCPGateway - ChatGPT` scheduled task. Choose Run in Task Scheduler, or run:
-
-```powershell
-Start-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
-```
-
-The default task action is `powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "<repository>\scripts\connect_tunnel.ps1" -Watch`. It monitors every 30 seconds and reconnects without a visible window. Only if the task is not registered, install it from the repository root; installation starts it immediately:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install_autostart.ps1
-```
-
-| Entry point | Behavior and display |
+| Area | Examples |
 | --- | --- |
-| `tunnel-client.exe run --profile-dir ... --profile home-mcp --log.file=` | Runs the tunnel itself in the current console; load the environment as shown above |
-| Existing `80_HomeMCPGateway - ChatGPT` task | Runs `connect_tunnel.ps1 -Watch` continuously in a hidden window |
-| `.\scripts\connect_tunnel.ps1` | Connects in process mode, checks status, then returns to the prompt; the runtime continues |
-| `.\scripts\connect_tunnel.ps1 -Watch` | Keeps the monitor in the invoking window; the tunnel remains a separately managed process |
-| `.\scripts\run_gateway.cmd` | Starts the stdio Gateway itself; does not connect the tunnel or open its management page |
+| Files | Read/write, search, copy/move/delete, hash |
+| Commands & processes | Run PowerShell / shell / Python; start, monitor, and stop processes |
+| Long-running jobs | Run CLI agents such as Codex in the background, check progress, and steer them |
+| Development | Git status, worktree creation, diffs, and cleanup |
+| Browser | Playwright automation, attach to a signed-in Edge ([guide](docs/browser-edge-attach.ja.md)) |
+| Desktop | Screenshots, screen observation and Computer Use clicks/typing ([details](docs/computer-use.ja.md)) |
+| Network | HTTP requests, downloads, waiting for ports/HTTP readiness |
+| Android | Tap, type, screenshots, and app management over ADB |
 
-This repository has no batch launcher that opens a dedicated visible tunnel window. `Connected ... using process mode` with `process_running / healthy / ready = True` indicates a background connection, not a visible foreground launch. `connect_tunnel.ps1` reports its management page as `ui_url` and saves it in `.runtime\supervisor-status.json`. Closing a Watch window and stopping its managed runtime are separate operations.
+## Common setup
 
-### Background-mode status and restart
-
-Run the following in PowerShell at the repository root. It selects an extracted executable without relying on `PATH`. If `.env` specifies another location through `TUNNEL_CLIENT_PATH`, assign that same full path to `$TunnelClient` instead. PowerShell does not automatically load `.env` values into variables.
-
-```powershell
-$TunnelClient = (Get-ChildItem -Path '.\tunnel-client-*\tunnel-client.exe' -File -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
-if (-not $TunnelClient) { throw 'Assign the full path of the extracted tunnel-client.exe to $TunnelClient.' }
-& $TunnelClient runtimes status home-mcp --json
-```
-
-**After changing `.env` or Gateway code, stop and restart the runtime; rerunning the connect command alone is insufficient.** When using the scheduled task, stop its monitoring first, then run the following with the executable selected above:
+Requires a Windows PC and Python 3.10+.
 
 ```powershell
-Stop-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
-& $TunnelClient runtimes stop home-mcp
-Start-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
+git clone https://github.com/ttttdiva/HomeMCPGateway
+Set-Location HomeMCPGateway
+.\scripts\setup_windows.ps1
 ```
 
-Startup is asynchronous. Check that all three status fields become True, then refresh the ChatGPT connection metadata. For manual Watch mode, end that monitor first, stop the runtime, and resume with `.\scripts\connect_tunnel.ps1 -Watch`. Replace `home-mcp` with the actual alias if you changed `TUNNEL_ALIAS`.
+Then set up only the AI services you want to use. Each one runs as an auto-starting scheduled task.
 
-To also disable autostart, disable and stop the task before stopping the runtime. Re-enable and run the task to resume:
+## ChatGPT
+
+Uses OpenAI Secure MCP Tunnel (requires a workspace with Developer mode).
+
+1. Extract the **full** Windows ZIP of [tunnel-client](https://github.com/openai/tunnel-client/releases/latest) into the repository, or point `TUNNEL_CLIENT_PATH` in `.env` at it.
+2. Create a Tunnel in [OpenAI Tunnels settings](https://platform.openai.com/settings/organization/tunnels) and associate it with your ChatGPT workspace. Create a Restricted key with only **Tunnels: Read / Use** under [API keys](https://platform.openai.com/settings/organization/api-keys).
+3. Create `.env` and install the task:
+
+   ```powershell
+   Copy-Item .env.example .env   # fill in CONTROL_PLANE_TUNNEL_ID and CONTROL_PLANE_API_KEY
+   .\scripts\install_autostart.ps1   # registers and starts "80_HomeMCPGateway - ChatGPT"
+   ```
+
+4. In ChatGPT Developer mode, create an app with connection **Tunnel** and authentication **No authentication**. Never enter the API key into ChatGPT.
+
+For a one-off manual connection use `.\scripts\connect_tunnel.ps1`; to restart use `Restart-Gateway.bat`.
+
+## Claude Code (cloud) / claude.ai
+
+Runs an HTTP MCP server on local `127.0.0.1:8766`, exposed through your own HTTPS route (e.g. Cloudflare Tunnel).
 
 ```powershell
-Disable-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
-Stop-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
-& $TunnelClient runtimes stop home-mcp
+.\scripts\install_claude_gateway_http_task.ps1   # task "80_HomeMCPGateway - Claude Code"
 ```
 
-## AoiTalk (optional)
+On first run, a secret URL path and Bearer token are generated in `.local/claude-code-mcp/secrets/`. Add an ingress that forwards `/claude-mcp/<path-secret>/mcp` to port 8766, then register the URL from `connector.txt` and the `Authorization: Bearer ...` header under Claude **Customize > Connectors > Custom**. See [Claude Code connection](docs/claude-code-remote-mcp.md).
 
-AoiTalk tools are exposed only through the dedicated AoiTalk MCP connection. Since Phase B, the generic Gateway now exposes **92 tools** and no longer registers the old `aoitalk_*` tools; `HOME_MCP_AOITALK_ENABLED` is an inactive legacy flag and does not affect its catalog. [The Phase B catalog change](docs/aoitalk-plugin.md) records the removed tool names and the offline catalog contract. The dedicated connection exposes **35 tools** (3 Clip, 5 local task, 5 API Agent, 8 CLI session, and 14 management tools). Never send AoiTalk credentials to ChatGPT.
+## Muse
 
-AoiTalk and its endpoint, authentication, and required features must be configured separately. This gateway does not install or configure AoiTalk. Configure a separately provisioned Tunnel ID in `HOME_MCP_AOITALK_TUNNEL_ID`; optionally set a dedicated Restricted runtime key in `HOME_MCP_AOITALK_RUNTIME_API_KEY`. After the separate tunnel preflight, use `scripts\connect_tunnel.ps1 -Target aoitalk`. Its alias/profile is `aoitalk`, status and logs live under `.runtime\aoitalk\`, and its profile is `.runtime\profiles\aoitalk.yaml`. To register its separate autostart task, use `scripts\install_autostart.ps1 -Target aoitalk`; the default task name is `Home MCP Gateway - AoiTalk`. These commands do not create a Tunnel or add/refresh a plugin in the GUI.
+Give Muse the Gateway directly as a custom connector. It runs on local `127.0.0.1:8765`, exposed through an HTTPS route.
 
-See [the dedicated AoiTalk MCP guide](docs/aoitalk-plugin.md) for its tools, operation-ID recovery and Docs/Knowledge paging contracts.
+```powershell
+.\scripts\install_muse_gateway_http_task.ps1   # task "80_HomeMCPGateway - Muse"
+```
 
-## Tool groups
+`path.secret` / `token.secret` must already exist in `.local/muse-grok-native/mcp/secrets/`. For Muse's credential proxy, a Bearer-token-only endpoint `/muse-bearer/mcp` is also available. See [Muse connection](docs/muse-full-gateway.md).
 
-The generic Gateway exposes 92 tools. The main groups are:
+## Scheduled tasks
 
-| Group | Examples |
-| --- | --- |
-| Host and files | System information, environment variables, file reads/writes, search, copy, move, delete, hashing |
-| Commands and processes | Arbitrary shell / PowerShell / Python, process start, inspection, and termination |
-| Network | Arbitrary HTTP(S) requests, downloads, and TCP / HTTP readiness checks |
-| Desktop and devices | Windows observation/UI actions, bounded held-key QA for the approved Unreal project, screenshots, and Android / ADB |
-| Development workflows | Git repositories / worktrees, persistent jobs, and browser sessions (Playwright) |
-| Images and diagnostics | Image context plus local tool-timing diagnostics |
+| Task name | Client | Local |
+| --- | --- | --- |
+| `80_HomeMCPGateway - ChatGPT` | ChatGPT | tunnel-client |
+| `80_HomeMCPGateway - Claude Code` | Claude Code / claude.ai | `127.0.0.1:8766` |
+| `80_HomeMCPGateway - Muse` | Muse | `127.0.0.1:8765` |
 
-The separate AoiTalk MCP connection exposes 35 tools (3 Clip, 5 local task, 5 API Agent, 8 CLI session, and 14 management tools). They are not included in the generic Gateway's 92-tool catalog.
+After changing code or `.env`, restart the relevant task with `Stop-ScheduledTask` → `Start-ScheduledTask`, then refresh the tool list on the AI side.
 
-These groups do not create an allowlist or a read-only boundary. Limit connections and prompts to people and workflows you trust.
+## AoiTalk integration (optional)
+
+Only if you use AoiTalk: a dedicated MCP (35 tools) can be exposed over a separate Tunnel (`connect_tunnel.ps1 -Target aoitalk`). It is not part of the generic Gateway. See [AoiTalk dedicated MCP](docs/aoitalk-plugin.md).
+
+## More docs
+
+- [Codex launch and WindowsApps handling](docs/codex-app-server.md) — Codex started by the Gateway runs with full access and inherits the full environment
+- [Long-running job dispatcher / supervisor](docs/work-dispatcher.md), [resource queue](docs/resource-queue.md)
+- [Muse Workspace MCP](docs/muse-workspace-mcp.md) — a separate server that exposes only registered worktrees to Muse
 
 ## Troubleshooting
 
-- `Python 3.10+ was not found`: install Python 3.10 or newer, reopen PowerShell, and run `setup_windows.ps1` again.
-- `tunnel-client.exe` not found: extract the complete Windows ZIP (not the runtime-only package), put the executable on `PATH`, or set `TUNNEL_CLIENT_PATH`.
-- Runtime is not `ready`: check the Tunnel ID, the Restricted runtime key's Tunnels Read / Use permissions, the tunnel-to-workspace association, and the local runtime status.
-- ChatGPT shows no tools: verify Developer mode, **Tunnel**, the correct Tunnel ID, **No authentication**, and local `ready` status; restart the gateway and use [Refresh MCP metadata](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata).
-- AoiTalk tools are missing: check that the dedicated AoiTalk MCP connection is enabled. The legacy `HOME_MCP_AOITALK_ENABLED` flag does not affect the catalog.
-- Old `aoitalk_*` names remain under Home MCP Gateway and return `Unknown tool`: open that connection's settings and select **Refresh**. A runtime restart is unnecessary; delete and re-add the connection only if Refresh does not resolve it.
-- A credential was pasted into ChatGPT: rotate the runtime API key immediately and remove it from conversations, app settings, and shared logs. ChatGPT does not need this key.
+- **Tools missing or stale:** Check that the task is running, then refresh the tool list in the AI's connector.
+- **ChatGPT never reaches `ready`:** Check the Tunnel ID, the Restricted key's permissions (Tunnels Read / Use), and the Tunnel–workspace association.
+- **Pasted a secret by mistake:** Rotate that key/token immediately and remove it from conversations and logs.
 
-This is an outbound tunnel, so opening a Windows inbound firewall rule is not a troubleshooting step.
-
-## Development tests
-
-The setup script runs the standard library test suite. Run it again with:
-
-```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-```
-
-For the optional pytest suite:
+## Tests
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 .\.venv\Scripts\python.exe -m pytest -q
 ```
-
-Do not pass local credentials as test arguments or to ChatGPT when testing against a real Tunnel or AoiTalk service.

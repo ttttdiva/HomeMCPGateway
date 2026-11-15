@@ -2,251 +2,112 @@
 
 # Home MCP Gateway
 
-Home MCP Gateway は、Windows PC 上で動くローカル MCP サーバーを OpenAI Secure MCP Tunnel 経由で ChatGPT に接続し、PC のファイル・プロセス・ネットワーク・デスクトップ操作を MCP ツールとして提供します。
+**クラウドの AI（ChatGPT / Claude Code・claude.ai / Muse）から、自宅の Windows PC を MCP ツールとして操作するためのトンネル MCP サーバーです。**
 
-> **重要な警告:** この Gateway は、実行中の Windows ユーザーが利用できるローカルのファイル、プロセス、ネットワーク、デスクトップに無制限にアクセスできます。信頼できるプライベートトンネルでのみ使用し、公開インターネットや信頼できないユーザーには接続しないでください。
+PC 側では同じ Gateway（92 ツール）を動かし、各 AI サービスにはそれぞれのコネクタ（プラグイン）として登録します。受信ポートを開ける必要はありません。
 
-## 必要なもの
-
-- Windows PC
-- Python 3.10 以上
-- Tunnel と Developer mode を利用できる適格な OpenAI / ChatGPT ワークスペース
-- このリポジトリを実行できる PowerShell
-
-## PC 側のセットアップ
-
-以下は、公開リポジトリから取得して初回接続する手順です。
-
-1. リポジトリを取得します。
-
-   ```powershell
-   git clone https://github.com/ttttdiva/HomeMCPGateway
-   Set-Location HomeMCPGateway
-   ```
-
-   Git を使わない場合は、同じ公開リポジトリの [Code → Download ZIP](https://github.com/ttttdiva/HomeMCPGateway) で ZIP をダウンロードし、展開したフォルダーを作業フォルダーにしてください。
-
-2. 依存関係、仮想環境、開発用の基本テストをセットアップします。
-
-   ```powershell
-   .\scripts\setup_windows.ps1
-   ```
-
-3. [公式 tunnel-client リリース](https://github.com/openai/tunnel-client/releases/latest) から Windows **amd64 または arm64 の完全な ZIP** をダウンロードします。runtime-only の ZIP は使わないでください。展開した `tunnel-client.exe` を PATH に置くか、このリポジトリ内の展開フォルダーに置くか、`.env` の `TUNNEL_CLIENT_PATH` にフルパスを指定します。必要なら同じリリースの `SHA256SUMS.txt` でハッシュを確認してください。
-
-4. [OpenAI Organization の Tunnels 設定](https://platform.openai.com/settings/organization/tunnels) を開き、Tunnel を作成または既存の Tunnel を確認し、使用する ChatGPT ワークスペースに関連付けます。ここで扱う値を混同しないでください。
-
-   - **Tunnel ID** は接続先を識別する値です。秘密ではなく、`.env` の `CONTROL_PLANE_TUNNEL_ID` に入れます。
-   - **Runtime API key** は、この PC の tunnel-client が実行時に使う Restricted API key です。次の手順で作成し、`.env` の `CONTROL_PLANE_API_KEY` にだけ保存します。
-   - **Admin key** は Organization の Tunnel を作成・変更・確認する管理用の認証情報です。Runtime API key の代わりにはならず、`.env` や ChatGPT に貼り付けません。
-
-5. [Organization の API keys](https://platform.openai.com/settings/organization/api-keys) で **Restricted** runtime API key を作成し、**Tunnels: Read** と **Tunnels: Use** だけを付与します。キーは作成時に一度だけ表示されるため、その場で安全に保管してください。管理用の認証情報と runtime API key を取り違えないでください。
-
-6. サンプルをコピーしてプレースホルダーを埋めます。
-
-   ```powershell
-   Copy-Item .env.example .env
-   ```
-
-   `.env` の最低限の値は次のとおりです。`TUNNEL_CLIENT_PATH` は PATH や標準のリポジトリ内検索で見つからない場合だけ設定します。
-
-   ```dotenv
-   CONTROL_PLANE_TUNNEL_ID=<your-tunnel-id>
-   CONTROL_PLANE_API_KEY=<your-restricted-runtime-api-key>
-   TUNNEL_ALIAS=home-mcp
-   # TUNNEL_CLIENT_PATH=<full-path-to-tunnel-client.exe>
-   ```
-
-   `.env`、Tunnel ID、runtime API key は Git に追加せず、ChatGPT のメッセージやアプリ設定にも入力しないでください。
-
-7. 初回の接続とprofile作成を確認します。トンネル本体を可視コンソールで動かす手順は後述します。
-
-   ```powershell
-   .\scripts\connect_tunnel.ps1
-   ```
-
-   スクリプトは `home-mcp` というローカル runtime を起動し、`process_running`、`healthy`、`ready` を確認してプロンプトへ戻ります。トンネル画面は自動で開きません。接続は外向きに行われるため、受信用のファイアウォールポートを開ける必要はありません。
-
-## ChatGPT 側のセットアップ
-
-1. ChatGPT の Developer mode を有効にします。
-2. アプリ / connector の作成画面を開き、接続方式に **Tunnel** を選びます。
-3. 先ほど作成または確認した Tunnel を選択するか、Tunnel ID を貼り付けます。認証方式は **No authentication** を選びます。runtime API key は tunnel-client と OpenAI の間だけで使われ、ChatGPT に渡しません。
-4. 表示されたツールを確認してアプリ / connector を作成し、Gateway の runtime が `ready` になっている状態で接続します。
-
-公式の手順は [Connect ChatGPT to a remote MCP server](https://developers.openai.com/plugins/deploy/connect-chatgpt)、メタデータ更新は [Refresh MCP metadata](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata) を参照してください。ChatGPT のプロジェクトや接続アプリの一般的な使い方は [Using Projects in ChatGPT](https://help.openai.com/en/articles/10169521-using-projects-in-chatgpt) にあります。
-
-## 通常起動・再起動・画面表示
-
-### トンネル本体を可視コンソールで実行する
-
-**本体を手元のPowerShellで動かす場合は `tunnel-client.exe run` を使います。** `runtimes connect` は本体を管理対象の別プロセスとして起動・再利用するコマンドです。`connect_tunnel.ps1 -Watch` が表示するのは監視役の画面で、本体の前景コンソールではありません。
-
-以下は、初回接続で `.runtime\profiles\home-mcp.yaml` が作成済みの場合の手順です。先に既存の監視と同じトンネルのruntimeを停止し、二重起動しない状態にしてから、リポジトリのルートで開いた専用PowerShellに貼り付けます。停止手順は下のバックグラウンド運用の節を参照してください。
-
-既存profileのAPI keyは `env:CONTROL_PLANE_API_KEY` 参照です。`run` 自体はリポジトリの `.env` を読み込みません。また、`connect_tunnel.ps1` は終了時に呼出元の環境を元へ戻すため、その実行後もキーがPowerShellに残るとは限りません。次の例は既存スクリプトと同じく `.env` を文字列として読み、キーを表示・コマンド引数へ展開せず、終了時に環境を復元します。
-
-配置先は新しく開いたPowerShell自身で指定します。以下はこのPCの配置例です。別の場所へ配置した場合は、`$GatewayRoot`の1行を実際の絶対パスへ変更してください。
-
-```powershell
-$GatewayRoot = 'D:\Dev\80_HomeMCPGateway'
-Set-Location -LiteralPath $GatewayRoot
-if (-not (Test-Path -LiteralPath (Join-Path $GatewayRoot '.env') -PathType Leaf)) { throw 'Gateway .env not found.' }
-$GatewaySavedEnv = @{}
-try {
-    foreach ($Line in [IO.File]::ReadAllLines((Join-Path $GatewayRoot '.env'))) {
-        $Entry = $Line.Trim()
-        if (-not $Entry -or $Entry.StartsWith('#')) { continue }
-        if ($Entry -notmatch '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') { throw 'Invalid .env assignment.' }
-        $Name = $Matches[1]
-        $Value = $Matches[2].Trim()
-        if ($Value.Length -ge 2 -and (($Value.StartsWith('"') -and $Value.EndsWith('"')) -or ($Value.StartsWith("'") -and $Value.EndsWith("'")))) {
-            $Value = $Value.Substring(1, $Value.Length - 2)
-        }
-        if (-not $GatewaySavedEnv.ContainsKey($Name)) {
-            $GatewaySavedEnv[$Name] = [Environment]::GetEnvironmentVariable($Name, 'Process')
-        }
-        [Environment]::SetEnvironmentVariable($Name, $Value, 'Process')
-    }
-    $TunnelClient = $env:TUNNEL_CLIENT_PATH
-    if (-not $TunnelClient) {
-        $TunnelClient = (Get-ChildItem -Path (Join-Path $GatewayRoot 'tunnel-client-*\tunnel-client.exe') -File |
-            Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
-    }
-    if (-not $TunnelClient -or -not (Test-Path -LiteralPath $TunnelClient -PathType Leaf)) { throw 'Set TUNNEL_CLIENT_PATH in .env.' }
-    if (-not $env:CONTROL_PLANE_API_KEY) { throw 'CONTROL_PLANE_API_KEY is required.' }
-    & $TunnelClient run --profile-dir (Join-Path $GatewayRoot '.runtime\profiles') --profile home-mcp --log.file=
-} finally {
-    foreach ($Name in $GatewaySavedEnv.Keys) {
-        [Environment]::SetEnvironmentVariable($Name, $GatewaySavedEnv[$Name], 'Process')
-    }
-}
+```text
+ChatGPT        ── OpenAI Secure MCP Tunnel ──┐
+Claude Code ─┐                               ├─> Home MCP Gateway ─> Windows PC
+claude.ai   ─┴─ HTTPS (Cloudflare Tunnel 等) ─┤   (ファイル / コマンド / ブラウザ /
+Muse           ── HTTPS (Cloudflare Tunnel 等) ─┘    デスクトップ / Git / Android ...)
 ```
 
-このPowerShellが本体のコンソールです。既存profileはログをファイルへ出すため、`--log.file=`の空値指定で標準出力へ切り替えます。`--log.file stdout`は`stdout`というファイルを作るため使いません。Ctrl+Cで前景実行を終了し、再起動時は同じ手順で `.env` を読み直します。キーの実値を引数に追加する必要はありません。別のprofile名・認証環境変数を使っている場合は、既存profileの参照に合わせてください。
+> **警告:** Gateway は実行中の Windows ユーザーと同じ権限で、ファイル・プロセス・ネットワーク・デスクトップを**無制限に**操作できます。自分だけが使うプライベートな接続に限定し、URL やトークンは絶対に共有しないでください。
 
-`run` は `runtimes` 管理起動ではないため、管理側の過去の `stopped` 表示や `.runtime\supervisor-status.json` を前景プロセスの生存状態と同一視しません。本体のコンソールとhealth URLで確認してください。ブラウザ管理画面はhealth URLの `/ui` です。最新health URLの保存先はprofileの `health.url_file` で確認できます。
+## できること
 
-### 非表示のバックグラウンド運用
+チャットで頼むだけで、AI が自宅 PC 上で次のような作業をします。
 
-本体の可視コンソールが不要で、自動起動を設定済みなら、タスクスケジューラの `80_HomeMCPGateway - ChatGPT` タスクを使います。タスクスケジューラで「実行」を選ぶか、次を実行します。
-
-```powershell
-Start-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
-```
-
-このタスクの標準Actionは `powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "<repository>\scripts\connect_tunnel.ps1" -Watch` です。非表示で30秒ごとに監視し、異常時に再接続します。タスクが未登録の場合だけ、リポジトリのルートで次を実行して登録します。登録処理はタスクを直ちに起動します。
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install_autostart.ps1
-```
-
-起動方式と画面の違いは次のとおりです。
-
-| 入口 | 動作と表示 |
+| 分類 | 例 |
 | --- | --- |
-| `tunnel-client.exe run --profile-dir ... --profile home-mcp --log.file=` | トンネル本体を現在のコンソールで前景実行。上の環境読込が必要 |
-| 登録済み `80_HomeMCPGateway - ChatGPT` タスク | `connect_tunnel.ps1 -Watch` を非表示で継続実行 |
-| `.\scripts\connect_tunnel.ps1` | process modeで接続・状態確認後、プロンプトへ戻る。runtimeは継続する |
-| `.\scripts\connect_tunnel.ps1 -Watch` | 実行したPowerShell画面で監視役を継続。本体は管理対象の別プロセス |
-| `.\scripts\run_gateway.cmd` | stdio Gateway本体の起動。トンネル接続や管理画面を開くバッチではない |
+| ファイル | 読み書き、検索、コピー・移動・削除、ハッシュ |
+| コマンド・プロセス | PowerShell / shell / Python の実行、プロセスの起動・監視・終了 |
+| 長時間ジョブ | Codex などの CLI エージェントをバックグラウンドで走らせて進捗確認・指示追加 |
+| 開発 | Git の状態確認、worktree 作成・差分・後片付け |
+| ブラウザ | Playwright 操作、ログイン済み Edge へのアタッチ（[ガイド](docs/browser-edge-attach.ja.md)） |
+| デスクトップ | スクリーンショット、画面観測とクリック・入力などの Computer Use（[詳細](docs/computer-use.ja.md)） |
+| ネットワーク | HTTP リクエスト、ダウンロード、ポート / HTTP の起動待ち |
+| Android | ADB 経由のタップ、入力、スクリーンショット、アプリ管理 |
 
-見える専用トンネルウィンドウを開くバッチは、このリポジトリにはありません。`Connected ... using process mode` と `process_running / healthy / ready = True` は、バックグラウンド接続できた状態です。本体を可視起動したという意味ではありません。`connect_tunnel.ps1` の管理画面URLは出力の `ui_url` と `.runtime\supervisor-status.json` に記録されます。Watch画面を閉じることと、管理対象runtimeの停止は別です。
+## 共通の準備
 
-### バックグラウンド運用の状態確認と再起動
-
-以下はリポジトリのルートのPowerShellで実行します。PATHを前提にせず、展開済みの実行ファイルを選びます。`.env` の `TUNNEL_CLIENT_PATH` で別の配置先を指定している場合は、同じフルパスを `$TunnelClient` に設定してください。`.env` の値はPowerShell変数へ自動では読み込まれません。
-
-```powershell
-$TunnelClient = (Get-ChildItem -Path '.\tunnel-client-*\tunnel-client.exe' -File -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
-if (-not $TunnelClient) { throw '展開先のtunnel-client.exeのフルパスを $TunnelClient に指定してください。' }
-& $TunnelClient runtimes status home-mcp --json
-```
-
-**`.env`やGatewayコードを変更した後は、接続コマンドの再実行だけでなくruntimeを停止して起動し直します。** 登録済みタスクを使う場合は、監視による再接続を止めてから次の順で操作します（`$TunnelClient` は上で確認した実行ファイルです）。
+Windows PC と Python 3.10 以上が必要です。
 
 ```powershell
-Stop-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
-& $TunnelClient runtimes stop home-mcp
-Start-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
+git clone https://github.com/ttttdiva/HomeMCPGateway
+Set-Location HomeMCPGateway
+.\scripts\setup_windows.ps1
 ```
 
-起動は非同期です。状態確認で3項目がTrueになることを確認し、ChatGPT側でメタデータを更新してください。手動Watchを使っている場合は先にその監視を終了し、runtime停止後に `.\scripts\connect_tunnel.ps1 -Watch` で再開します。`TUNNEL_ALIAS`を変更している場合は、例の `home-mcp` を実際のaliasに置き換えます。
+あとは使いたい AI サービスの分だけ、以下を設定します。どれも常駐タスクとして自動起動します。
 
-自動起動も止める場合は、タスクを無効化・停止してからruntimeを停止します。再開時はタスクを有効化して実行してください。
+## ChatGPT
+
+OpenAI の Secure MCP Tunnel を使います（Developer mode が使えるワークスペースが必要）。
+
+1. [tunnel-client](https://github.com/openai/tunnel-client/releases/latest) の Windows 用**完全版 ZIP** を展開し、リポジトリ内に置くか `.env` の `TUNNEL_CLIENT_PATH` で指定します。
+2. [OpenAI の Tunnels 設定](https://platform.openai.com/settings/organization/tunnels)で Tunnel を作り ChatGPT ワークスペースに関連付け、[API keys](https://platform.openai.com/settings/organization/api-keys) で **Tunnels: Read / Use** だけの Restricted key を作ります。
+3. `.env` を作成します。
+
+   ```powershell
+   Copy-Item .env.example .env   # CONTROL_PLANE_TUNNEL_ID と CONTROL_PLANE_API_KEY を記入
+   .\scripts\install_autostart.ps1   # タスク「80_HomeMCPGateway - ChatGPT」を登録・起動
+   ```
+
+4. ChatGPT の Developer mode でアプリを作成し、接続方式 **Tunnel**、認証 **No authentication** を選びます。API key は ChatGPT に入力しません。
+
+手動で一度だけ接続するなら `.\scripts\connect_tunnel.ps1`、再起動は `Restart-Gateway.bat` です。
+
+## Claude Code（クラウド）/ claude.ai
+
+ローカルの `127.0.0.1:8766` で HTTP の MCP サーバーを動かし、自前の HTTPS 経路（Cloudflare Tunnel など）で公開します。
 
 ```powershell
-Disable-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
-Stop-ScheduledTask -TaskName '80_HomeMCPGateway - ChatGPT'
-& $TunnelClient runtimes stop home-mcp
+.\scripts\install_claude_gateway_http_task.ps1   # タスク「80_HomeMCPGateway - Claude Code」
 ```
 
-## AoiTalk（任意）
+初回に秘密 URL パスと Bearer トークンが `.local/claude-code-mcp/secrets/` に生成されます。`/claude-mcp/<path-secret>/mcp` を 8766 へ転送する ingress を用意し、Claude の **Customize > Connectors > Custom** に `connector.txt` の URL と `Authorization: Bearer ...` ヘッダーを登録します。詳細は [Claude Code 接続](docs/claude-code-remote-mcp.md)。
 
-AoiTalk tools は AoiTalk 専用 MCP 接続だけで公開されます。Phase B 以降、汎用 Gateway は現在 **92 tools** を公開し、旧 `aoitalk_*` tools を登録しません。`HOME_MCP_AOITALK_ENABLED` はcatalogに影響しない無効な旧flagです。撤去した tool 名と offline catalog 契約は [Phase B の catalog 変更](docs/aoitalk-plugin.md) に記録しています。専用接続は **35 tools**（Clip 3、local task 5、API Agent 5、CLI session 8、管理14）を公開します。認証情報を ChatGPT に渡さないでください。
+## Muse
 
-AoiTalk 自体と接続先・認証・必要な機能は別途設定が必要です。この Gateway は AoiTalk をインストールまたは設定しません。専用接続には、別途用意したTunnel IDを `.env` の `HOME_MCP_AOITALK_TUNNEL_ID` に設定し、必要なら `HOME_MCP_AOITALK_RUNTIME_API_KEY` に専用Restricted runtime keyを設定します。専用Tunnelの運用preflight後に `scripts\connect_tunnel.ps1 -Target aoitalk` を使います。既定alias/profileは `aoitalk`、状態とログは `.runtime\aoitalk\`、profileファイルは `.runtime\profiles\aoitalk.yaml` です。自動起動を登録する場合は `scripts\install_autostart.ps1 -Target aoitalk` を使い、既定TaskName `Home MCP Gateway - AoiTalk` を利用します。どちらのコマンドもTunnelを新規発行せず、GUIでのPlugin追加・Refreshは行いません。
+Muse のカスタムコネクタに Gateway を直接持たせます。ローカルの `127.0.0.1:8765` で動かし、HTTPS 経路で公開します。
 
-専用MCPのtool構成、operation IDによる安全な再照合、Docs/Knowledgeのページング契約は [AoiTalk専用MCP](docs/aoitalk-plugin.md) を参照してください。
+```powershell
+.\scripts\install_muse_gateway_http_task.ps1   # タスク「80_HomeMCPGateway - Muse」
+```
 
-正準 Agent / Qwen route の選択、read-only stdio scope、接続・検証・OFFへの戻し方は
-[Agent 委譲の接続手順](docs/aoitalk-agent-delegation.md) を参照してください。
+`.local/muse-grok-native/mcp/secrets/` に `path.secret` / `token.secret` を用意しておく必要があります。Muse の資格情報プロキシ向けに、Bearer トークンだけで認証する `/muse-bearer/mcp` も使えます。詳細は [Muse 接続](docs/muse-full-gateway.md)。
 
-## ツールの概要
+## 常駐タスク
 
-汎用 Gateway は92ツールです。主なグループは次のとおりです。
+| タスク名 | 接続先 | ローカル |
+| --- | --- | --- |
+| `80_HomeMCPGateway - ChatGPT` | ChatGPT | tunnel-client |
+| `80_HomeMCPGateway - Claude Code` | Claude Code / claude.ai | `127.0.0.1:8766` |
+| `80_HomeMCPGateway - Muse` | Muse | `127.0.0.1:8765` |
 
-| グループ | 主な内容 |
-| --- | --- |
-| ホスト・ファイル | システム情報、環境変数、ファイルの読み書き、検索、コピー、移動、削除、ハッシュ |
-| コマンド・プロセス | 任意の shell / PowerShell / Python、プロセスの開始・確認・終了 |
-| ネットワーク | 任意の HTTP(S) リクエスト、ダウンロード、TCP / HTTP の readiness 確認 |
-| デスクトップ・端末 | Windows の観測・UI 操作、承認済みUnrealプロジェクト向けの有限Held-key QA、スクリーンショット（MCPネイティブPNG）、座標系 `screen`/`window`/`normalized` による視覚付きComputer Use（[詳細](docs/computer-use.ja.md)）、Android / ADB |
-| 開発ワークフロー | Git リポジトリ / worktree、長時間ジョブ、ブラウザ（Playwright） |
-| 画像・診断 | 画像コンテキスト、ツール実行のローカル診断ログ |
+コードや `.env` を変えたら該当タスクを `Stop-ScheduledTask` → `Start-ScheduledTask` で再起動し、AI 側でツール一覧を更新（Refresh）してください。
 
-ログイン済みEdgeの既存プロファイル・タブを明示選択して利用する方法は、[既存Edge接続ガイド](docs/browser-edge-attach.ja.md)を参照してください。
+## AoiTalk 連携（任意）
 
-別接続の AoiTalk 専用MCPは35 tools（Clip 3、local task 5、API Agent 5、CLI session 8、管理14）を公開します。このcatalogは汎用Gatewayの92 toolsには含まれません。
+AoiTalk を使っている場合のみ、専用 MCP（35 ツール）を別の Tunnel で公開できます（`connect_tunnel.ps1 -Target aoitalk`）。汎用 Gateway には含まれません。詳細は [AoiTalk 専用 MCP](docs/aoitalk-plugin.md)。
 
-これらのグループにもアクセス制限や read-only 境界が追加されるわけではありません。接続相手とプロンプトを信頼できる範囲に限定してください。
+## その他のドキュメント
 
-## ジョブの環境と Codex の WindowsApps エイリアス
-
-長時間ジョブの子プロセス環境は親環境をすべて継承し、ジョブが明示した `env` を重ねて作ります（環境変数の許可リスト・秘密情報の自動除外は適用しません）。Windows では、Gateway の直接 Codex 起動（`job_start`、dispatcher、app-server、`run_command`、`start_process`）に、子プロセス専用の PATH 補正を既定で適用します。公式 native / Node、bare CLI と npm shim の直接起動が対象です。複合 shell コマンドや任意ラッパー内の起動は自動判定できません。
-
-Gateway の直接 Codex exec ジョブは、起動側が `--sandbox workspace-write` / `--approve-for-me` などを指定しても、明示的に `--dangerously-bypass-approvals-and-sandbox` へ統一し、シェル環境変数を全継承します。Codex 以外・app-server 起動・複合シェル内の Codex は変更しません。フルアクセスでは Codex にWindowsユーザーと同等のファイル・ネットワーク操作権限が与えられます。
-
-WindowsApps の PowerShell alias や MSIX を避け、利用可能な非パッケージ版 PowerShell 7 を優先します。候補がなければ問題の PATH エントリを除外し、System32 の Windows PowerShell 5.1 にフォールバックします。必要な shell を確認できない場合は明示的に起動エラーになります。ファイルが存在しないと確認できた WindowsApps エントリは残します。PATH エントリを除外すると、その中の他のアプリも Codex と子プロセスから名前で起動できなくなります。PowerShell 7 を優先すると、そのディレクトリ内の他のコマンドの優先順位も変わることがあります。
-
-互換性のため、ジョブの明示 `env` で `HOME_MCP_CODEX_WINDOWSAPPS_POLICY=exclude_alias` を指定すると従来の強制除外、`off` または `diagnose` を指定すると従来の診断専用動作になります。明示されない場合は自動補正されます。Claude、Grok、Agy などの非 Codex 起動と Windows のユーザー・システム環境変数は変更しません。詳細と対象外の起動形は [Codex の Windows shell 選択](docs/codex-app-server.md#windows-codex-shell-selection)を参照してください。
+- [Codex 起動と WindowsApps の扱い](docs/codex-app-server.md) — Gateway から起動する Codex はフルアクセス・環境変数全継承で動きます
+- [長時間ジョブの dispatcher / supervisor](docs/work-dispatcher.md)、[resource queue](docs/resource-queue.md)
+- [Muse Workspace MCP](docs/muse-workspace-mcp.md) — 登録した worktree だけを Muse に見せる別サーバー
 
 ## トラブルシューティング
 
-- `Python 3.10+ was not found` が出る場合: Python 3.10 以上をインストールし、PowerShell を開き直して `setup_windows.ps1` を再実行します。
-- `tunnel-client.exe` が見つからない場合: runtime-only ではない完全な Windows ZIP を展開し、`tunnel-client.exe` を PATH に置くか `TUNNEL_CLIENT_PATH` を設定します。
-- runtime が `ready` にならない場合: Tunnel ID、Restricted runtime API key の Tunnels Read / Use、Tunnel と ChatGPT ワークスペースの関連付け、ローカルの runtime 状態を確認します。
-- ChatGPT にツールが表示されない場合: Developer mode、アプリの **Tunnel**、正しい Tunnel ID、**No authentication**、runtime の `ready` を確認してから、Gateway を再起動し [Refresh MCP metadata](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata) を実行します。
-- AoiTalk tools が表示されない場合: ChatGPT の AoiTalk 専用 MCP 接続が有効か確認します。旧flag `HOME_MCP_AOITALK_ENABLED` はcatalogに影響しません。
-- Home MCP Gateway に旧 `aoitalk_*` 名が残って `Unknown tool` になる場合: 接続設定で「ツールを更新」(Refresh) します。runtime の再起動は不要です。Refresh で解消しない場合だけ接続を削除して再追加します。
-- 認証情報を誤って貼り付けた場合: runtime API key を直ちにローテーションし、ChatGPT の会話・アプリ設定・共有ログから削除します。ChatGPT は runtime API key を必要としません。
+- **ツールが表示されない / 古い:** タスクが動いているか確認し、AI 側のコネクタでツール一覧を Refresh します。
+- **ChatGPT で `ready` にならない:** Tunnel ID、Restricted key の権限（Tunnels Read / Use）、Tunnel とワークスペースの関連付けを確認します。
+- **秘密情報を貼ってしまった:** 該当のキー / トークンをすぐ再発行し、会話やログから削除してください。
 
-受信用ポートを開ける方式ではないため、Tunnel が接続できないときに Windows の受信ファイアウォール規則を追加する必要はありません。
-
-## 開発者向けテスト
-
-セットアップ スクリプトが実行する基本テスト:
-
-```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-```
-
-開発用 extra をインストールして pytest も実行できます。
+## テスト
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 .\.venv\Scripts\python.exe -m pytest -q
 ```
-
-実際の Tunnel や AoiTalk に接続するテストでは、ローカルの資格情報をテスト引数や ChatGPT に渡さないでください。
