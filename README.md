@@ -2,13 +2,13 @@
 
 # Home MCP Gateway
 
-**クラウドの AI（ChatGPT / Claude Code・claude.ai / Muse）から、自宅の Windows PC を MCP ツールとして操作するためのトンネル MCP サーバーです。**
+**クラウドの AI（ChatGPT / Claude Code・claude.ai / Muse）から、Windows ワークスペースを MCP ツールとして操作するためのトンネル MCP サーバーです。**（自宅の PC を操作する用途にも使えます）
 
 PC 側では同じ Gateway（92 ツール）を動かし、各 AI サービスにはそれぞれのコネクタ（プラグイン）として登録します。受信ポートを開ける必要はありません。
 
 ```text
 ChatGPT        ── OpenAI Secure MCP Tunnel ──┐
-Claude Code ─┐                               ├─> Home MCP Gateway ─> Windows PC
+Claude Code ─┐                               ├─> Home MCP Gateway ─> Windows
 claude.ai   ─┴─ HTTPS (Cloudflare Tunnel 等) ─┤   (ファイル / コマンド / ブラウザ /
 Muse           ── HTTPS (Cloudflare Tunnel 等) ─┘    デスクトップ / Git / Android ...)
 ```
@@ -17,7 +17,7 @@ Muse           ── HTTPS (Cloudflare Tunnel 等) ─┘    デスクトップ
 
 ## できること
 
-チャットで頼むだけで、AI が自宅 PC 上で次のような作業をします。
+チャットで頼むだけで、AI が Gateway を動かしている Windows 上で次のような作業をします。
 
 | 分類 | 例 |
 | --- | --- |
@@ -32,7 +32,7 @@ Muse           ── HTTPS (Cloudflare Tunnel 等) ─┘    デスクトップ
 
 ## 共通の準備
 
-Windows PC と Python 3.10 以上が必要です。
+Windows と Python 3.10 以上が必要です。
 
 ```powershell
 git clone https://github.com/ttttdiva/HomeMCPGateway
