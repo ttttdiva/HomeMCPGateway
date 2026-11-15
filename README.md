@@ -77,7 +77,7 @@ Muse のカスタムコネクタに Gateway を直接持たせます。ローカ
 .\scripts\install_muse_gateway_http_task.ps1   # タスク「80_HomeMCPGateway - Muse」
 ```
 
-`.local/muse-grok-native/mcp/secrets/` に `path.secret` / `token.secret` を用意しておく必要があります。Muse の資格情報プロキシ向けに、Bearer トークンだけで認証する `/muse-bearer/mcp` も使えます。詳細は [Muse 接続](docs/muse-full-gateway.md)。
+`.local/muse-grok-native/mcp/secrets/` に `path.secret` / `token.secret` を用意しておく必要があります。**Museの新規登録・別アカウント追加では `/muse-bearer/mcp` + Bearer Tokenのみを推奨**します。初回登録時にMuseのチャットへ貼る依頼文と、401/403の切り分けは [Museコネクター設定・403診断ガイド](docs/muse-connector-setup.ja.md) を参照してください（[サーバー構成の詳細](docs/muse-full-gateway.md)）。
 
 ## 常駐タスク
 
@@ -102,6 +102,7 @@ AoiTalk を使っている場合のみ、専用 MCP（35 ツール）を別の T
 ## トラブルシューティング
 
 - **ツールが表示されない / 古い:** タスクが動いているか確認し、AI 側のコネクタでツール一覧を Refresh します。
+- **Museで403が発生:** Gatewayの認証失敗は401です。`403 credential_ambiguity`（Muse側）やCloudflare `Error 1010`（User-Agentなど）を[診断ガイド](docs/muse-connector-setup.ja.md#401--403-の切り分け)で区別し、トークンを再入力する前にレスポンスの返却元を確認してください。
 - **ChatGPT で `ready` にならない:** Tunnel ID、Restricted key の権限（Tunnels Read / Use）、Tunnel とワークスペースの関連付けを確認します。
 - **秘密情報を貼ってしまった:** 該当のキー / トークンをすぐ再発行し、会話やログから削除してください。
 
